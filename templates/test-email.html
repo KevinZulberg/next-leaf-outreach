@@ -1,0 +1,10 @@
+<div class="page-heading">
+    <div><h1>Test email</h1><p>Check that HMail Plus can send a message to your inbox.</p></div>
+    <a class="btn secondary" href="{{ url_for('send') }}">Back to sending</a>
+</div>
+<section class="panel form-panel">
+    <form method="post">
+        <label for="test-email">Your email address</label><input id="test-email" type="email" name="email" required>
+        <button>Send test email</button>
+    </form>
+</section>

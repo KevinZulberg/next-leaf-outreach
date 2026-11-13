@@ -1,0 +1,19 @@
+<div class="page-heading">
+    <div><h1>Sending queue</h1><p>When automatic sending is on, approved drafts send in the background.</p></div>
+    <a class="btn secondary" href="{{ url_for('test') }}">Send a test email</a>
+</div>
+<section class="panel queue">
+        <div class="panel-heading queue-heading"><div><h2>Approved drafts</h2><p>These drafts are queued for automatic sending.</p></div></div>
+    <form method="post">
+        {% if not auto_send %}<div class="selection-bar"><button {% if not rows %}disabled{% endif %}>Send selected now</button></div>{% endif %}
+        <div class="tablewrap" tabindex="0" aria-label="Approved drafts">
+            <table><thead><tr><th scope="col">Status</th><th scope="col">Recipient</th><th scope="col">Subject</th></tr></thead>
+                <tbody>{% for r in rows %}<tr>
+                    <td>{% if not auto_send and r.status == 'approved' %}<input class="check" name="ids" type="checkbox" value="{{ r.id }}" aria-label="Select {{ r.company }}">{% endif %}
+                    <span class="tag tag-{{ r.status }}">{{ r.status|capitalize }}</span></td>
+                    <td><strong>{{ r.company }}</strong><small>{{ r.email }}</small></td><td>{{ r.subject }}</td>
+                </tr>{% else %}<tr><td colspan="3" class="empty">No approved drafts are ready to send.</td></tr>{% endfor %}</tbody>
+            </table>
+        </div>
+    </form>
+</section>

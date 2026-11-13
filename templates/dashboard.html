@@ -1,0 +1,92 @@
+<section class="hero">
+    <div class="hero-copy">
+        <h1>Outreach overview</h1>
+        <p>Review new drafts and track email delivery.</p>
+        <a class="btn hero-button" href="{{ url_for('research') }}">Research leads <span aria-hidden="true">↗</span></a>
+    </div>
+    <div class="schedule-card">
+        <div class="schedule-label"><span class="schedule-dot"></span> Research schedule</div>
+        <strong>{{ schedule }} <small>SAST</small></strong>
+        <p>Monday–Thursday</p>
+        <div class="schedule-note">Automatic sending <b>{{ 'on' if auto_send else 'off' }}</b></div>
+    </div>
+</section>
+
+<section class="stats" aria-label="Outreach totals">
+    {% for label, number, detail, symbol, status in [
+        ('Contacts', total, 'All businesses', '◎', 'all'),
+        ('Drafts', drafts, 'Awaiting review or permission', '▤', 'draft'),
+        ('Approved', approved, 'Queued for sending', '✓', 'approved'),
+        ('Sent', sent, 'Accepted by HMail Plus', '↗', 'sent')
+    ] %}
+    <button class="stat" type="button" data-filter-shortcut="{{ status }}">
+        <span class="stat-top">{{ label }} <span class="stat-icon" aria-hidden="true">{{ symbol }}</span></span>
+        <strong>{{ number }}</strong><small>{{ detail }}</small>
+    </button>
+    {% endfor %}
+</section>
+
+<section class="panel queue" id="draft-queue">
+    <div class="panel-heading queue-heading">
+        <div><h2>Outreach queue</h2><p>{% if auto_send %}Eligible emails send automatically when permission is recorded.{% else %}Record permission before sending a draft.{% endif %}</p></div>
+        <a class="btn secondary" href="{{ url_for('send') }}">Open sending queue <span aria-hidden="true">↗</span></a>
+    </div>
+    <div class="queue-tools">
+        <div class="filters" role="group" aria-label="Filter contacts by status">
+            {% for status, label in [('draft', 'Drafts'), ('approved', 'Approved'), ('sent', 'Sent history'), ('all', 'All contacts')] %}
+            <button type="button" data-filter="{{ status }}" aria-pressed="{{ 'true' if status == 'draft' else 'false' }}">{{ label }}</button>
+            {% endfor %}
+        </div>
+        <label class="search-box"><span aria-hidden="true">⌕</span><input id="queue-search" type="search" placeholder="Find a company or email" aria-label="Find a company or email"></label>
+    </div>
+    <form method="post" action="{{ url_for('confirm_selected') }}" id="permission-form">
+        <input type="hidden" name="permission_token" value="{{ token }}">
+        <div class="selection-bar" id="permission-controls" {% if not selectable %}hidden{% endif %}>
+            <div class="actions">
+                <button type="button" class="secondary" id="select-all-drafts" {% if not selectable %}disabled{% endif %}>Select visible drafts</button>
+                <span class="selection-count" id="selection-count" aria-live="polite">0 selected</span>
+            </div>
+            <button type="submit" id="confirm-drafts" {% if not selectable %}disabled{% endif %}>Record permission for selected</button>
+            <p class="help permission-help">Use this only for businesses that have agreed to receive marketing from Nextleaf.</p>
+        </div>
+        <div class="tablewrap" tabindex="0" aria-label="Contacts">
+            <table class="contacts-table">
+                <thead><tr><th scope="col">Select</th><th scope="col">Company</th><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Permission</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead>
+                <tbody>
+                {% for r in contacts %}
+                <tr data-contact-status="{{ r.status }}" data-contact-search="{{ r.company }} {{ r.email }}" {% if r.status != 'draft' %}hidden{% endif %}>
+                    <td>{% if r.id in selectable %}<input class="check" type="checkbox" name="ids" value="{{ r.id }}" aria-label="Select {{ r.company }}">{% endif %}</td>
+                    <td><div class="company-cell"><span class="company-avatar" aria-hidden="true">{{ (r.company|trim)[:2]|upper }}</span><div><strong>{{ r.company }}</strong>{% if r.observation %}<small>{{ r.observation.split(' · ')[0] }}</small>{% endif %}</div></div></td>
+                    <td class="email-cell">{{ r.email }}</td>
+                    <td><span class="tag tag-{{ r.status }}">{{ r.status|capitalize }}</span>{% if r.status == 'sent' and r.sent_at %}<small>{{ r.sent_at[:10] }}</small>{% endif %}</td>
+                    <td class="permission-cell">{{ {'consent': 'Confirmed', 'existing_customer': 'Existing customer'}.get(r.consent_basis, 'Not recorded') }}</td>
+                    <td class="row-action"><a class="btn row-button" href="{{ url_for('contact', cid=r.id) }}">{{ 'View' if r.status == 'sent' else 'Review' }} <span aria-hidden="true">›</span></a></td>
+                </tr>
+                {% endfor %}
+                <tr id="empty-queue" {% if drafts %}hidden{% endif %}><td colspan="6" class="empty">No drafts to review.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </form>
+</section>
+
+<section class="utility-grid" aria-label="Workspace tools">
+    <details class="panel utility">
+        <summary>Import contacts <span aria-hidden="true">+</span></summary>
+        <p class="help">Upload a CSV of contacts. Existing addresses are skipped.</p>
+        <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+            <label for="contact-csv">Contact CSV</label>
+            <input id="contact-csv" type="file" name="file" accept=".csv" required>
+            <div class="actions"><button>Import CSV</button><a class="btn secondary" href="{{ url_for('sample') }}">Sample file</a></div>
+        </form>
+    </details>
+    <details class="panel utility">
+        <summary>Draft template <span aria-hidden="true">+</span></summary>
+        <form method="post" action="{{ url_for('generate') }}">
+            <label for="template-subject">Subject</label><input id="template-subject" type="text" name="subject" value="{{ subject }}" required>
+            <label for="template-body">Email template</label><textarea id="template-body" name="body" rows="9" required>{{ template }}</textarea>
+            <p class="help">Updates all current drafts. Available fields are <code>{{ '{{company}}' }}</code>, <code>{{ '{{name}}' }}</code> and <code>{{ '{{observation}}' }}</code>.</p>
+            <button>Update draft text</button>
+        </form>
+    </details>
+</section>

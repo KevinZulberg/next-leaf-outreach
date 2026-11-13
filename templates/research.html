@@ -1,0 +1,82 @@
+<div class="page-heading">
+    <div><h1>Outreach businesses</h1><p>Choose a batch size or select businesses below.</p></div>
+    <a class="btn secondary" href="{{ url_for('home', view='sent') }}#draft-queue">Sent history</a>
+</div>
+<details class="panel utility">
+    <summary>Research schedule and search tools</summary>
+    <div class="panel-heading">
+        <div>
+            <h2>South Africa search</h2>
+            <p>{{ schedule }} SAST, Monday–Thursday · {{ 'Scheduled' if enabled else 'Paused' }}{% if not configured %} · Tavily key required{% endif %}</p>
+        </div>
+        <form method="post" action="{{ url_for('research_automatic') }}"><button {% if not configured %}disabled{% endif %}>Run research now</button></form>
+    </div>
+    <div class="research-metrics"><span class="tag">{{ count }} websites found</span><span class="tag">{{ ready }} company emails</span>
+        {% if latest %}<span class="tag tag-{{ 'approved' if latest.status == 'completed' else 'draft' }}">Last run {{ latest.day }} · {{ latest.status|capitalize }}</span>{% endif %}
+    </div>
+    {% if latest %}<p class="help" style="margin-top: 12px">{{ latest.found }} found · {{ latest.added }} new · {{ latest.inspected }} inspected · {{ latest.emails }} published emails in the last run.</p>{% endif %}
+</details>
+<section class="panel queue">
+    <div class="panel-heading queue-heading">
+        <div>
+            <h2>{{ 'Other websites' if other else 'Businesses with published emails' }}</h2>
+            <p>Showing {{ prospects|length }} of {{ count - ready if other else ready }}.</p>
+        </div>
+        <a class="btn secondary" href="{{ url_for('research') if other else url_for('research', view='other') }}">{{ 'Show published emails' if other else 'Show other websites' }}</a>
+    </div>
+    {% if other %}
+    <form method="post" action="{{ url_for('research_enrich') }}">
+        <button class="secondary" name="retry" value="1">Recheck 3 older sites</button>
+    </form>
+    {% endif %}
+    {% if not other %}
+    <form id="research-send" method="post" action="{{ url_for('research_send') }}">
+        <input type="hidden" name="permission_token" value="{{ token }}">
+        <div class="selection-bar">
+            <div class="actions">
+                <label for="batch-size">Batch size</label>
+                <input id="batch-size" type="number" min="1" max="200" value="50">
+                <button type="button" class="secondary" id="pick-batch">Select batch</button>
+                <span id="batch-count" aria-live="polite">0 selected</span>
+            </div>
+            <button type="submit" id="send-batch" disabled>{{ 'Send selected' if auto_send else 'Queue selected' }}</button>
+            <p class="help permission-help">Send selected confirms the recipients have given Nextleaf permission to email them.</p>
+        </div>
+    {% endif %}
+    <div class="tablewrap research-results" tabindex="0" aria-label="Discovered businesses">
+        <table class="research-table">
+            <thead><tr>{% if not other %}<th scope="col">Select</th>{% endif %}<th scope="col">Company</th><th scope="col">Website</th><th scope="col">Public email</th><th scope="col">Progress</th></tr></thead>
+            <tbody>{% for r in prospects %}
+            <tr>{% if not other %}<td>{% if r.contact_id in selectable %}<input class="check" type="checkbox" name="ids" value="{{ r.contact_id }}" aria-label="Select {{ r.company }}">{% endif %}</td>{% endif %}
+            <td><strong>{{ r.company }}</strong></td><td><a href="{{ r.website }}" target="_blank" rel="noopener noreferrer">{{ r.domain }}</a></td>
+            <td>
+                {% if r.email %}{{ r.email }}{% if r.email_source %}<small><a href="{{ r.email_source }}">Email source</a></small>{% endif %}
+                {% elif r.status == 'contact_form' %}<a href="{{ r.email_source }}" target="_blank" rel="noopener noreferrer">Contact form only</a>
+                {% elif r.researched %}Email not found
+                {% else %}Awaiting scan{% endif %}
+            </td>
+            <td>{% if r.contact_id %}<a href="{{ url_for('contact', cid=r.contact_id) }}">{{ {'draft':'Preview draft','approved':'Queued','sending':'Sending','uncertain':'Check delivery'}.get(r.contact_status, r.contact_status|capitalize) }}</a>{% else %}<span class="tag tag-draft">{{ 'Inspected' if r.researched else 'Pending' }}</span>{% endif %}
+            {% if r.observation_source %}<small><a href="{{ r.observation_source }}">Website evidence</a></small>{% endif %}</td></tr>
+            {% else %}<tr><td colspan="{{ 4 if other else 5 }}" class="empty">{{ 'No other websites to show.' if other else 'No unsent businesses with published emails.' }}</td></tr>{% endfor %}</tbody>
+        </table>
+    </div>
+    {% if not other %}</form>{% endif %}
+</section>
+<section class="utility-grid" aria-label="Manual research tools">
+    <details class="panel utility">
+        <summary>Search by industry and location <span aria-hidden="true">+</span></summary>
+        <form method="post" action="{{ url_for('research_find') }}">
+            <label for="industry">Type of business</label><input id="industry" type="text" name="industry" value="engineering and manufacturing" required>
+            <label for="location">City or region</label><input id="location" type="text" name="location" value="Johannesburg South Africa" required>
+            <label for="target">Websites to look for (up to 60)</label><input id="target" type="text" name="target" value="40">
+            <button {% if not configured %}disabled{% endif %}>Find company websites</button>
+        </form>
+    </details>
+    <details class="panel utility">
+        <summary>Inspect websites or write drafts <span aria-hidden="true">+</span></summary>
+        <form method="post" action="{{ url_for('research_enrich') }}"><button class="secondary">Inspect next 10 websites</button></form>
+        <form class="stacked-form" method="post" action="{{ url_for('research_draft') }}">
+            <button>Write drafts from outreach template</button>
+        </form>
+    </details>
+</section>
