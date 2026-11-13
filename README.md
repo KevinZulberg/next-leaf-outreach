@@ -1,83 +1,57 @@
-# Nextleaf Outreach Studio
+# Nextleaf Outreach
 
-A local, human-reviewed outreach dashboard that imports a CSV, creates personalised drafts, tracks approval and send status, prevents duplicates, manages opt-outs, and sends through HMail Plus SMTP. The AI Research page can discover and inspect company websites, then prepare reviewable outreach drafts.
+Finds South African businesses, checks their websites for a published company email, writes a personalised draft for each, and sends the emails automatically. Open the app any time to watch what it is doing.
+
+## How a normal day works (autopilot)
+
+Monday to Thursday, Johannesburg time:
+
+| Time | What happens |
+| --- | --- |
+| 09:00 | **Find.** Searches for businesses (Tavily), opens each new website, looks for a published company email, and writes a draft. Searches per day are worked out from the credits you have left this month. |
+| 21:00 | **Send.** Sends up to 100 emails (oldest first), about 20 seconds apart, through HMail Plus. Stops at 100 for the day. |
+
+Nothing needs approving. Businesses with no public email are never emailed; they appear under **Needs attention**. Anyone on the **Opt-outs** list is never emailed.
+
+## The app
+
+* **Leads** – the whole workflow on one page: searches and credits today, businesses ready to email, how many were sent today, and every lead in tabs (Ready, Queued, Sent, Needs attention). Select businesses to **Send now** (after ticking the permission box) or **Skip** them so autopilot never emails them.
+* **Sending** – the queue, recent sends, and a test-email button.
+* **Opt-outs** – add anyone who asks to stop.
+* **Tools** – search a specific trade/city, edit the email template, import a CSV, export everything, recent search history.
 
 ## Quick start
 
-1. Install Python 3.10 or later.
-2. Open a terminal in this directory.
-3. Run `python -m pip install -r requirements.txt`.
-4. Copy `.env.example` to `.env`. Enter your **own** mailbox email and password. Do not paste your password into ChatGPT or upload `.env` to GitHub.
-5. Run `python run.py`.
-6. Open http://127.0.0.1:5050 in your browser.
-7. Download the sample CSV, fill it with contacts where you have valid permission and documented evidence, then import.
-8. Generate drafts, review each one, replace `[Your website / contact details]`, and approve individually.
-9. Use **Send a test email** to send a single message to yourself; verify reception.
-10. Review the batch and manually select recipients. Max 20 messages per action, default 3 seconds apart. Follow provider rate limits.
+1. Install Python 3.10+ and run `python -m pip install -r requirements.txt`.
+2. Copy `.env.example` to `.env` and fill in your HMail Plus mailbox and Tavily key. Never commit `.env`.
+3. Run `python run.py` and open http://127.0.0.1:5050 (or see `HOSTING.md` to run it 24/7 on a server, which autopilot needs).
+4. On **Tools → Send a test email**, send one to yourself first.
 
-## HMail Plus settings
+## Settings (`.env`, restart after changing)
 
-HMail Plus documentation says SMTP host `smtp.hmailplus.com`, port `465` with SSL/TLS or `587` with STARTTLS. Username is your full email address. See: https://help.hostafrica.com/article/general-how-to-guide-for-microsoft-outlook-email-apps-windows-mac-mobile-web
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `TAVILY_API_KEY` | – | Needed to find businesses. |
+| `TAVILY_MONTHLY_CREDITS` | `1000` | Credits the app may spend per month (1 per search). |
+| `RESEARCH_AUTOMATION` / `RESEARCH_TIME` | `1` / `09:00` | Daily search on or off, and when. |
+| `RESEARCH_DAILY_SEARCHES` | blank | Optional ceiling on searches per day. |
+| `AUTO_SEND` | `0` | `1` turns on autopilot sending. |
+| `AUTO_APPROVE` | `1` | `1` also sends drafts for businesses found online. `0` sends only emails you approved by hand. |
+| `AUTO_SEND_TIME` / `AUTO_SEND_LIMIT` | `21:00` / `100` | When to send and the maximum per day (manual sends count too). |
+| `SEND_DELAY_SECONDS` | `3` | Pause between emails. 20 is gentler on mail providers. |
+| `SEND_BATCH_LIMIT` | `50` | Most emails you can send by hand in one click. |
+
+## Safety built in
+
+* Duplicate protection: a business is reserved before it is emailed, so restarts or double clicks cannot send twice.
+* An email the mail server did not clearly accept is marked **Check delivery** and is never retried automatically. Three of these in a day stop that night's sending.
+* Every email carries an unsubscribe line and a `List-Unsubscribe` header. Replies asking to stop must be added to **Opt-outs** by you; the app does not read your inbox.
+* Each automatic send records *why* it was allowed: "Business email published on <page>; sent automatically on <date>". It does not claim the recipient gave consent.
 
 ## Important
 
-- This is a **local prototype**, not a hosted multi-user production app. Do not expose its port to the Internet. There is no authentication, HTTPS, CSRF protection, or access control.
-- Do not store passwords in source code or commit `.env` to GitHub.
-- The app's local SQLite database `outreach.db` stores addresses, evidence, drafts and logs. Back it up securely.
-- An SMTP success means the provider accepted the message; delivery, bounces and replies are not tracked.
-- Manually add opt-outs to suppression immediately. This prototype does not monitor incoming mail automatically.
-- Sending unknown or scraped prospects marketing emails without a lawful basis may violate South African POPIA section 69, and UK recipients may be covered by PECR and UK GDPR. Confirm consent or a legally qualifying customer basis and include your identity and an easy opt-out.
-- Your provider may prohibit mass mail or impose additional daily limits. Check before using batches.
-
-## AI Research Studio
-
-Open `http://127.0.0.1:5050/research`. The studio can:
-
-1. Use the **Tavily Search API** to discover public company websites by business sector and city.
-2. Inspect up to 10 company websites per click, respecting robots.txt, and try to locate a company-domain email. Not all websites expose emails; results aren't guaranteed to be accurate.
-3. Use the **OpenAI API** to write individually reviewable drafts for up to 10 contacts per click.
-4. Reuse the existing approval, suppression, duplicate-checking and HMail Plus SMTP sending workflow. **Nothing is automatically approved or sent.**
-
-### Limits and safety
-
-- This implementation performs **up to 3 search queries per click**, yielding at most 60 results before de-duplication; results may be fewer and may include irrelevant businesses. Repeat with different industries/cities to approach 200.
-- Manual website enrichment and AI drafting run in groups of up to 10. Scheduled research inspects newly discovered sites in the background. Email approval and sending are manual.
-- Website checks may be slow; respect website access limitations and API quotas.
-- Finding a publicly listed email is **not evidence of marketing consent**. POPIA/PECR requirements and HMail Plus's sending policy must be checked. The app deliberately requires evidence of a lawful basis before approval.
-- This is a **local prototype only**, with no login, access control or CSRF protection. Do not expose it publicly or deploy it to a production server without security review.
-- Your `.env` contains secrets. Never upload it to GitHub or send screenshots showing credentials to anyone.
-- Existing `.env` SMTP settings remain unchanged.
-
-## Automatic South Africa search
-
-To upgrade an existing installation, stop the current server, back up the
-project folder, then copy the files from the archive's `nextleaf_outreach` folder
-over the matching files in your existing folder. Keep your existing `.env` and
-`outreach.db`. Install the updated dependencies and start the app from that folder.
-
-```powershell
-python -m pip install -r requirements.txt
-python run.py
-```
-
-Set `TAVILY_API_KEY` in your existing `.env` if it is missing. Under **AI Research**,
-use **Run SA search now** to try discovery. Refresh to see the latest run and its
-counts. A separate scheduled run occurs on weekdays at 09:00 South Africa time
-by default, or later that day if the server starts after 09:00. The browser can
-be closed. The computer and Python server must be running.
-
-The first search targets Gauteng. Each run advances through the nine provinces
-and eleven search categories. The app skips existing website domains, inspects
-new sites and records the source pages for published company-domain emails
-and website observations. A provider error is recorded as a failed run.
-Use **Run SA search now** to run another search.
-
-Optional settings in `.env` (restart after changing them):
-
-- `RESEARCH_AUTOMATION=0` pauses the weekday schedule.
-- `RESEARCH_TIME=09:00` sets the local search time.
-- `RESEARCH_DAILY_LIMIT=20` sets the candidate limit per scheduled run (1–60).
-  Live results depend on the search provider and available company sites.
-
-Discovery only populates the research queue. Use the existing draft and review
-steps for outreach. Website-domain deduplication uses the local database.
+* **Lawful use is your responsibility.** A published business email is not marketing consent. South Africa (POPIA section 69) and the UK (PECR, UK GDPR) restrict unsolicited electronic marketing. Set `AUTO_APPROVE=0` if you want a human to approve every email.
+* There is no login. Do not expose the port to the internet; reach it through an SSH tunnel (see `HOSTING.md`).
+* Back up `outreach.db`; it holds addresses, drafts and logs.
+* SMTP acceptance is not inbox delivery. Bounces and replies are not tracked.
+* Website checks respect `robots.txt` and only read the company's own site.

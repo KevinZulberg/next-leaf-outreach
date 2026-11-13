@@ -1,92 +1,113 @@
-<section class="hero">
-    <div class="hero-copy">
-        <h1>Outreach overview</h1>
-        <p>Review new drafts and track email delivery.</p>
-        <a class="btn hero-button" href="{{ url_for('research') }}">Research leads <span aria-hidden="true">↗</span></a>
+<div class="page-heading">
+    <div>
+        <h1>Leads</h1>
+        <p>{% if autopilot.on %}Everything runs by itself. This page is just here to watch it.{% else %}Find businesses, check them, then approve and send.{% endif %}</p>
     </div>
-    <div class="schedule-card">
-        <div class="schedule-label"><span class="schedule-dot"></span> Research schedule</div>
-        <strong>{{ schedule }} <small>SAST</small></strong>
-        <p>Monday–Thursday</p>
-        <div class="schedule-note">Automatic sending <b>{{ 'on' if auto_send else 'off' }}</b></div>
+    <form method="post" action="{{ url_for('research_automatic') }}">
+        <button class="secondary" {% if not configured or running %}disabled{% endif %}>Find businesses now</button>
+    </form>
+</div>
+
+{% if running %}
+<div class="banner running" data-running><span class="spinner" aria-hidden="true"></span>Searching and checking websites. New businesses appear here by themselves.</div>
+{% endif %}
+{% if latest and latest.status == 'failed' %}
+<div class="banner error">The last search failed. Check your Tavily key and remaining credits under Tools.</div>
+{% endif %}
+{% if not configured %}
+<div class="banner warn">Add <code>TAVILY_API_KEY</code> to <code>.env</code> so the app can find businesses.</div>
+{% endif %}
+{% if autopilot.stuck %}
+<div class="banner error">{{ autopilot.stuck }} email{{ 's' if autopilot.stuck != 1 }} could not be confirmed as sent. <a href="{{ url_for('send') }}">Check the Sending page</a> before anything is retried.</div>
+{% endif %}
+{% if autopilot.on %}
+<div class="banner autopilot"><span class="dot" aria-hidden="true"></span><span><strong>Autopilot is on.</strong> Finds businesses at {{ schedule }}, then sends up to {{ autopilot.limit }} emails at {{ autopilot.send_time }}, Monday to Thursday.{% if not autopilot.approve %} Only approved emails are sent.{% endif %}</span></div>
+{% else %}
+<div class="banner warn">Autopilot is off. Set <code>AUTO_SEND=1</code> in <code>.env</code> to send automatically, or approve and send by hand below.</div>
+{% endif %}
+
+<section class="steps" aria-label="Today at a glance" data-status-url="{{ url_for('status_json') }}" id="steps">
+    <div class="step">
+        <div class="step-label"><span class="step-num">1</span> Find businesses</div>
+        <div class="step-value"><span id="searches-today">{{ searches_today }}</span><small>searches today</small></div>
+        <div class="step-detail">{{ found_today }} new websites · {{ found_today_emails }} with a company email</div>
+        <div class="meter" aria-hidden="true"><span id="credit-meter"></span></div>
+        <div class="step-foot"><span id="credits-text">Checking credits…</span>
+            <span>{% if enabled %}Next search {{ autopilot.next_search }}{% else %}Schedule paused{% endif %}</span></div>
+    </div>
+    <div class="step highlight">
+        <div class="step-label"><span class="step-num">2</span> Ready to email</div>
+        <div class="step-value">{{ counts.ready }}<small>businesses</small></div>
+        <div class="step-detail">Each email was found on the company's own website.</div>
+        <div class="step-foot"><span>{{ counts.attention }} need attention</span><a href="#leads" data-jump="attention">See why</a></div>
+    </div>
+    <div class="step">
+        <div class="step-label"><span class="step-num">3</span> Send</div>
+        <div class="step-value">{{ autopilot.used_today }}<small>/ {{ autopilot.limit }} sent today</small></div>
+        <div class="step-detail">{% if autopilot.on %}Next send {{ autopilot.next_send }}{% else %}Automatic sending is off{% endif %}</div>
+        <div class="meter" aria-hidden="true"><span style="width: {{ [100, (autopilot.used_today * 100 // autopilot.limit)]|min }}%"></span></div>
+        <div class="step-foot"><span>{{ counts.sent }} sent in total</span><a href="{{ url_for('send') }}">Open Sending</a></div>
     </div>
 </section>
 
-<section class="stats" aria-label="Outreach totals">
-    {% for label, number, detail, symbol, status in [
-        ('Contacts', total, 'All businesses', '◎', 'all'),
-        ('Drafts', drafts, 'Awaiting review or permission', '▤', 'draft'),
-        ('Approved', approved, 'Queued for sending', '✓', 'approved'),
-        ('Sent', sent, 'Accepted by HMail Plus', '↗', 'sent')
-    ] %}
-    <button class="stat" type="button" data-filter-shortcut="{{ status }}">
-        <span class="stat-top">{{ label }} <span class="stat-icon" aria-hidden="true">{{ symbol }}</span></span>
-        <strong>{{ number }}</strong><small>{{ detail }}</small>
-    </button>
-    {% endfor %}
-</section>
-
-<section class="panel queue" id="draft-queue">
-    <div class="panel-heading queue-heading">
-        <div><h2>Outreach queue</h2><p>{% if auto_send %}Eligible emails send automatically when permission is recorded.{% else %}Record permission before sending a draft.{% endif %}</p></div>
-        <a class="btn secondary" href="{{ url_for('send') }}">Open sending queue <span aria-hidden="true">↗</span></a>
-    </div>
-    <div class="queue-tools">
-        <div class="filters" role="group" aria-label="Filter contacts by status">
-            {% for status, label in [('draft', 'Drafts'), ('approved', 'Approved'), ('sent', 'Sent history'), ('all', 'All contacts')] %}
-            <button type="button" data-filter="{{ status }}" aria-pressed="{{ 'true' if status == 'draft' else 'false' }}">{{ label }}</button>
+<form method="post" id="lead-form" data-limit="{{ limit }}" data-auto="{{ 1 if autopilot.on else 0 }}" action="{{ url_for('confirm_selected') }}">
+<input type="hidden" name="permission_token" value="{{ token }}">
+<section class="panel flush" id="leads">
+    <div class="toolbar">
+        <div class="tabs" role="group" aria-label="Show">
+            {% for key, label in [('ready', 'Ready'), ('queued', 'Queued'), ('sent', 'Sent'), ('attention', 'Needs attention')] %}
+            <button type="button" class="tab" data-tab="{{ key }}" aria-pressed="{{ 'true' if key == 'ready' else 'false' }}">{{ label }}<b>{{ counts[key] }}</b></button>
             {% endfor %}
         </div>
-        <label class="search-box"><span aria-hidden="true">⌕</span><input id="queue-search" type="search" placeholder="Find a company or email" aria-label="Find a company or email"></label>
+        <label class="search"><span aria-hidden="true">⌕</span><input id="lead-search" type="search" placeholder="Search businesses" aria-label="Search businesses"></label>
     </div>
-    <form method="post" action="{{ url_for('confirm_selected') }}" id="permission-form">
-        <input type="hidden" name="permission_token" value="{{ token }}">
-        <div class="selection-bar" id="permission-controls" {% if not selectable %}hidden{% endif %}>
-            <div class="actions">
-                <button type="button" class="secondary" id="select-all-drafts" {% if not selectable %}disabled{% endif %}>Select visible drafts</button>
-                <span class="selection-count" id="selection-count" aria-live="polite">0 selected</span>
-            </div>
-            <button type="submit" id="confirm-drafts" {% if not selectable %}disabled{% endif %}>Record permission for selected</button>
-            <p class="help permission-help">Use this only for businesses that have agreed to receive marketing from Nextleaf.</p>
+    <div class="picker" id="picker" {% if not counts.ready %}hidden{% endif %}>
+        <label class="check-all"><input class="check" type="checkbox" id="check-all" aria-label="Select all shown"> Select all</label>
+        <span>or first</span>
+        <input type="number" id="first-n" min="1" max="{{ limit }}" value="{{ [25, limit]|min }}" aria-label="How many to select">
+        <button type="button" class="secondary small" id="pick-first">Select</button>
+        <span class="help">Optional. Nothing needs selecting while autopilot is on.</span>
+    </div>
+    <div id="lead-rows">
+    {% for lead in leads %}
+    <div class="lead{% if lead.selectable %} selectable{% endif %}" data-stage="{{ lead.stage }}" data-search="{{ lead.company }} {{ lead.email }} {{ lead.domain }}" {% if lead.stage != 'ready' %}hidden{% endif %}>
+        <div class="check-slot">{% if lead.selectable %}<input class="check" type="checkbox" name="ids" value="{{ lead.id }}" aria-label="Select {{ lead.company }}">{% endif %}</div>
+        <div>
+            <div class="lead-name">{{ lead.company }}{% if lead.is_new %}<span class="badge-new">New</span>{% endif %}</div>
+            <div class="lead-meta">{% if lead.website %}<a href="{{ lead.website }}" target="_blank" rel="noopener noreferrer">{{ lead.domain }} ↗</a>{% endif %}{% if lead.service %}{% if lead.website %} · {% endif %}{{ lead.service }}{% endif %}</div>
         </div>
-        <div class="tablewrap" tabindex="0" aria-label="Contacts">
-            <table class="contacts-table">
-                <thead><tr><th scope="col">Select</th><th scope="col">Company</th><th scope="col">Email</th><th scope="col">Status</th><th scope="col">Permission</th><th scope="col"><span class="sr-only">Action</span></th></tr></thead>
-                <tbody>
-                {% for r in contacts %}
-                <tr data-contact-status="{{ r.status }}" data-contact-search="{{ r.company }} {{ r.email }}" {% if r.status != 'draft' %}hidden{% endif %}>
-                    <td>{% if r.id in selectable %}<input class="check" type="checkbox" name="ids" value="{{ r.id }}" aria-label="Select {{ r.company }}">{% endif %}</td>
-                    <td><div class="company-cell"><span class="company-avatar" aria-hidden="true">{{ (r.company|trim)[:2]|upper }}</span><div><strong>{{ r.company }}</strong>{% if r.observation %}<small>{{ r.observation.split(' · ')[0] }}</small>{% endif %}</div></div></td>
-                    <td class="email-cell">{{ r.email }}</td>
-                    <td><span class="tag tag-{{ r.status }}">{{ r.status|capitalize }}</span>{% if r.status == 'sent' and r.sent_at %}<small>{{ r.sent_at[:10] }}</small>{% endif %}</td>
-                    <td class="permission-cell">{{ {'consent': 'Confirmed', 'existing_customer': 'Existing customer'}.get(r.consent_basis, 'Not recorded') }}</td>
-                    <td class="row-action"><a class="btn row-button" href="{{ url_for('contact', cid=r.id) }}">{{ 'View' if r.status == 'sent' else 'Review' }} <span aria-hidden="true">›</span></a></td>
-                </tr>
-                {% endfor %}
-                <tr id="empty-queue" {% if drafts %}hidden{% endif %}><td colspan="6" class="empty">No drafts to review.</td></tr>
-                </tbody>
-            </table>
+        <div class="lead-email">
+            {% if lead.email %}{{ lead.email }}
+                {% if lead.email_source %}<small><a class="ok" href="{{ lead.email_source }}" target="_blank" rel="noopener noreferrer">✓ Found on their website</a></small>{% endif %}
+            {% else %}<span class="muted">{{ lead.note }}</span>
+                {% if lead.email_source %}<small><a href="{{ lead.email_source }}" target="_blank" rel="noopener noreferrer">Open contact form ↗</a></small>{% endif %}
+            {% endif %}
         </div>
-    </form>
+        <div class="lead-state">
+            {% if lead.stage == 'ready' %}<span class="tag tag-ready">{{ 'Sends ' ~ autopilot.next_send if autopilot.on and autopilot.approve else 'Ready' }}</span>
+            {% elif lead.stage == 'queued' %}<span class="tag tag-{{ lead.status }}">{{ {'approved': 'Approved', 'sending': 'Sending', 'uncertain': 'Check delivery'}.get(lead.status, lead.status|capitalize) }}</span>
+            {% elif lead.stage == 'sent' %}<span class="tag tag-sent">Sent{% if lead.sent_at %} {{ lead.sent_at[:10] }}{% endif %}</span>
+            {% elif lead.email %}<span class="tag tag-draft">{{ lead.note or 'Needs attention' }}</span>
+            {% else %}<span class="tag tag-no_email">No email</span>{% endif %}
+        </div>
+        <div class="lead-action">{% if lead.id %}<a class="btn secondary small" href="{{ url_for('contact', cid=lead.id) }}">{{ 'View' if lead.stage in ('sent', 'queued') else 'Preview' }}</a>{% endif %}</div>
+    </div>
+    {% endfor %}
+    </div>
+    <div class="empty" id="lead-empty" hidden>
+        <strong id="empty-title">Nothing here yet</strong><span id="empty-text"></span>
+    </div>
 </section>
 
-<section class="utility-grid" aria-label="Workspace tools">
-    <details class="panel utility">
-        <summary>Import contacts <span aria-hidden="true">+</span></summary>
-        <p class="help">Upload a CSV of contacts. Existing addresses are skipped.</p>
-        <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
-            <label for="contact-csv">Contact CSV</label>
-            <input id="contact-csv" type="file" name="file" accept=".csv" required>
-            <div class="actions"><button>Import CSV</button><a class="btn secondary" href="{{ url_for('sample') }}">Sample file</a></div>
-        </form>
-    </details>
-    <details class="panel utility">
-        <summary>Draft template <span aria-hidden="true">+</span></summary>
-        <form method="post" action="{{ url_for('generate') }}">
-            <label for="template-subject">Subject</label><input id="template-subject" type="text" name="subject" value="{{ subject }}" required>
-            <label for="template-body">Email template</label><textarea id="template-body" name="body" rows="9" required>{{ template }}</textarea>
-            <p class="help">Updates all current drafts. Available fields are <code>{{ '{{company}}' }}</code>, <code>{{ '{{name}}' }}</code> and <code>{{ '{{observation}}' }}</code>.</p>
-            <button>Update draft text</button>
-        </form>
-    </details>
-</section>
+<div class="action-bar" id="action-bar" hidden>
+    <div class="action-inner">
+        <div class="action-count"><span id="selected-count">0 selected</span><small id="limit-note"></small></div>
+        <label class="permit"><input type="checkbox" name="confirm_permission" value="1" id="permit"><span>These businesses may be emailed by Nextleaf. I'm responsible for lawful use (POPIA / PECR).</span></label>
+        <div class="action-buttons">
+            <button type="submit" name="send_now" value="1" id="btn-send" disabled>{{ 'Send now' if autopilot.on else 'Approve & send now' }}</button>
+            {% if not autopilot.on %}<button type="submit" name="send_now" value="0" class="secondary" id="btn-approve" disabled>Approve only</button>{% endif %}
+            <button type="submit" class="secondary" formaction="{{ url_for('skip_selected') }}" formnovalidate id="btn-skip">Skip</button>
+        </div>
+    </div>
+</div>
+</form>

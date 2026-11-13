@@ -1,0 +1,65 @@
+<div class="page-heading"><div><h1>Tools</h1><p>Things you rarely need. Day to day, the Leads page is enough.</p></div></div>
+
+<div class="tool-grid">
+    <section class="panel">
+        <div class="panel-head"><div><h2>Search a specific trade or city</h2><p>Runs in the background and uses up to 3 search credits.</p></div></div>
+        <form method="post" action="{{ url_for('research_find') }}">
+            <label for="industry">Type of business</label><input id="industry" type="text" name="industry" value="engineering and manufacturing" required>
+            <label for="location">City or region</label><input id="location" type="text" name="location" value="Johannesburg South Africa" required>
+            <input type="hidden" name="target" value="60">
+            <button {% if not configured %}disabled{% endif %}>Find businesses</button>
+            {% if not configured %}<p class="help" style="margin-top:10px">Add <code>TAVILY_API_KEY</code> to <code>.env</code> first.</p>{% endif %}
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><div><h2>Autopilot</h2><p>Set in <code>.env</code>, restart to change.</p></div></div>
+        <div class="stack help">
+            <p>Search: {{ schedule }}, Monday to Thursday · {{ 'On' if enabled else 'Paused' }}</p>
+            <p>Sending: {{ 'On' if auto_send else 'Off' }} · <code>AUTO_SEND</code>, <code>AUTO_SEND_TIME</code>, <code>AUTO_SEND_LIMIT</code></p>
+            <p>Credits: <code>TAVILY_MONTHLY_CREDITS</code>, optional cap <code>RESEARCH_DAILY_SEARCHES</code></p>
+        </div>
+        <div class="actions" style="margin-top:14px">
+            <form method="post" action="{{ url_for('research_draft') }}"><button class="secondary small">Write missing drafts</button></form>
+            <form method="post" action="{{ url_for('research_enrich') }}"><button class="secondary small" name="retry" value="1">Re-check 3 older sites</button></form>
+        </div>
+    </section>
+
+    <section class="panel span-2">
+        <div class="panel-head"><div><h2>Email template</h2><p>Updates every draft that has not been sent. Fields: <code>{{ '{{company}}' }}</code> <code>{{ '{{name}}' }}</code> <code>{{ '{{observation}}' }}</code></p></div></div>
+        <form method="post" action="{{ url_for('generate') }}">
+            <label for="template-subject">Subject</label><input id="template-subject" type="text" name="subject" value="{{ subject }}" required>
+            <label for="template-body">Message</label><textarea id="template-body" name="body" rows="12" required>{{ template }}</textarea>
+            <button>Update drafts</button>
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><div><h2>Import contacts</h2><p>CSV with company and email columns. Duplicates are skipped.</p></div></div>
+        <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
+            <input id="contact-csv" type="file" name="file" accept=".csv" required aria-label="Contact CSV">
+            <div class="actions"><button>Import CSV</button><a class="btn secondary" href="{{ url_for('sample') }}">Sample file</a></div>
+        </form>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><div><h2>Backup and testing</h2><p>Download everything, or check that email sending works.</p></div></div>
+        <div class="actions"><a class="btn secondary" href="{{ url_for('export') }}">Export CSV</a><a class="btn secondary" href="{{ url_for('test') }}">Send a test email</a></div>
+    </section>
+
+    <section class="panel flush span-2">
+        <div class="toolbar"><h2>Recent searches</h2></div>
+        <div class="tablewrap">
+            <table>
+                <thead><tr><th>Date</th><th>Type</th><th>Searches</th><th>New sites</th><th>With email</th><th>Status</th></tr></thead>
+                <tbody>
+                {% for run in runs %}
+                <tr><td>{{ run.day }}</td><td>{{ 'Manual' if run.manual else 'Scheduled' }}{% if run.manual and run.region != 'South Africa' %}<small>{{ run.industry }} · {{ run.region }}</small>{% endif %}</td>
+                    <td>{{ run.searches or 0 }}</td><td>{{ run.added }}</td><td>{{ run.emails }}</td>
+                    <td><span class="tag tag-{{ {'completed': 'sent', 'running': 'sending', 'failed': 'suppressed'}.get(run.status, 'draft') }}">{{ run.status|capitalize }}</span></td></tr>
+                {% else %}<tr><td colspan="6" class="empty">No searches yet.</td></tr>{% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </section>
+</div>

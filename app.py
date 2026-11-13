@@ -1,15 +1,19 @@
 import csv, imaplib, io, os, re, sqlite3, ssl, smtplib, time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
+from zoneinfo import ZoneInfo
 from secrets import compare_digest, token_urlsafe
-from datetime import datetime, timezone
+from datetime import datetime, time as clock, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from html import escape
 from pathlib import Path
 from flask import Flask, request, redirect, url_for, flash, Response, abort, session, render_template, send_file
 from markupsafe import Markup
-from discovery import find_companies, inspect_company_site, search_allowance
+from discovery import credit_status, inspect_company_site
 
 BASE = Path(__file__).resolve().parent
+TIMEZONE = ZoneInfo('Africa/Johannesburg')
 DEMO_URL = 'https://nextleaf.co.za/demo'
 LEGACY_DEMO_URL = 'https://nextleaf.co.za/#work'
 DIRECTORY_TITLE = re.compile(r'\b(?:top\s+\d+|business directory|company directory|list of companies)\b', re.I)
@@ -35,12 +39,16 @@ def init_db():
         columns = {row['name'] for row in c.execute('PRAGMA table_info(prospects)')}
         if 'observation_source' not in columns:
             c.execute("ALTER TABLE prospects ADD COLUMN observation_source TEXT DEFAULT ''")
+        if 'found_at' not in columns:
+            c.execute("ALTER TABLE prospects ADD COLUMN found_at TEXT DEFAULT ''")
         c.execute("""CREATE TABLE IF NOT EXISTS research_runs (
             id INTEGER PRIMARY KEY, day TEXT NOT NULL, manual INTEGER NOT NULL,
             started_at TEXT NOT NULL, region TEXT NOT NULL, industry TEXT NOT NULL,
             status TEXT NOT NULL, found INTEGER DEFAULT 0, added INTEGER DEFAULT 0,
             inspected INTEGER DEFAULT 0, emails INTEGER DEFAULT 0
         )""")
+        if 'searches' not in {row['name'] for row in c.execute('PRAGMA table_info(research_runs)')}:
+            c.execute('ALTER TABLE research_runs ADD COLUMN searches INTEGER DEFAULT 0')
 
 EMAIL_RE=re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 
@@ -106,27 +114,174 @@ Yours would be built for {{company}}. Tell me how you currently quote and run jo
 
 Not relevant? Reply "no" and I won't email again.'''
 
+def auto_send_settings():
+    """(hour, minute, daily limit) for the nightly autopilot send."""
+    hour, minute = map(int, os.getenv('AUTO_SEND_TIME', '21:00').split(':'))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError('AUTO_SEND_TIME must use 24-hour HH:MM format')
+    try:
+        limit = max(1, int(os.getenv('AUTO_SEND_LIMIT', '100') or 100))
+    except ValueError:
+        limit = 100
+    return hour, minute, limit
+
+
+def next_slot(now, hour, minute, done_today=False):
+    """Human label for the next Monday-Thursday run at hour:minute."""
+    from datetime import timedelta
+    for offset in range(8):
+        day = now + timedelta(days=offset)
+        if day.weekday() >= 4:
+            continue
+        slot = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if offset == 0 and (slot <= now or done_today):
+            continue
+        name = 'today' if offset == 0 else ('tomorrow' if offset == 1 else slot.strftime('%A'))
+        return f'{name} {hour:02d}:{minute:02d}'
+    return ''
+
+
+SEND_BATCH_LIMIT = max(1, int(os.getenv('SEND_BATCH_LIMIT', '50') or 50))
+
+
+def send_delay():
+    try:
+        return max(0, min(float(os.getenv('SEND_DELAY_SECONDS', '3')), 60))
+    except ValueError:
+        return 3.0
+
+
+def send_batch(contact_ids):
+    """Send approved contacts one by one in the background. Stops at the first uncertain result."""
+    delay = send_delay()
+    for contact_id in contact_ids:
+        try:
+            result = submit_contact(contact_id)
+        except Exception:
+            break
+        if result == 'uncertain':
+            break
+        if result == 'submitted':
+            time.sleep(delay)
+
+
+def day_start_utc(now):
+    return datetime.combine(now.date(), clock.min, TIMEZONE).astimezone(timezone.utc).isoformat()
+
+
+def build_leads(c, now):
+    """Every business the user may need to act on, as plain dicts for the Leads page."""
+    today = now.date().isoformat()
+    suppressed = {row['email'].lower() for row in c.execute('SELECT email FROM suppression')}
+    sites = {row['email'].lower(): row for row in c.execute("SELECT * FROM prospects WHERE email != ''")}
+    leads = []
+    for r in c.execute("""SELECT * FROM contacts
+            WHERE status IN ('draft','approved','sending','uncertain','skipped')
+               OR id IN (SELECT id FROM contacts WHERE status='sent' ORDER BY id DESC LIMIT 200)
+            ORDER BY id DESC"""):
+        site = sites.get(r['email'].lower())
+        lead = {
+            'id': r['id'], 'company': r['company'], 'email': r['email'], 'status': r['status'],
+            'service': (r['observation'] or '').split(' · ')[0] if site else (r['observation'] or '')[:60],
+            'website': site['website'] if site else '', 'domain': site['domain'] if site else '',
+            'email_source': site['email_source'] if site else '',
+            'evidence': site['observation_source'] if site else '',
+            'is_new': bool(site and (site['found_at'] or '')[:10] == today),
+            'sent_at': r['sent_at'], 'note': '', 'selectable': False,
+        }
+        if r['status'] == 'draft':
+            if DIRECTORY_TITLE.search(r['company']):
+                lead['note'] = 'Looks like a directory page, not a business'
+            elif not complete_message(r['subject'], r['body']):
+                lead['note'] = 'Draft needs finishing'
+            elif r['email'].lower() in suppressed:
+                lead['note'] = 'On the opt-out list'
+            else:
+                lead['selectable'] = True
+            lead['stage'] = 'ready' if lead['selectable'] else 'attention'
+        elif r['status'] == 'skipped':
+            lead['stage'] = 'attention'
+            lead['note'] = 'Skipped, will not be emailed'
+        elif r['status'] == 'sent':
+            lead['stage'] = 'sent'
+        else:
+            lead['stage'] = 'queued'
+        leads.append(lead)
+    for p in c.execute("SELECT * FROM prospects WHERE email='' ORDER BY id DESC LIMIT 200"):
+        if p['status'] == 'contact_form':
+            note = 'Contact form only, no public email'
+        elif p['researched']:
+            note = 'No public email found'
+        else:
+            note = 'Waiting to be checked'
+        leads.append({
+            'id': None, 'company': p['company'], 'email': '', 'status': 'no_email', 'stage': 'attention',
+            'service': '', 'website': p['website'], 'domain': p['domain'],
+            'email_source': p['email_source'] if p['status'] == 'contact_form' else '', 'evidence': '',
+            'is_new': (p['found_at'] or '')[:10] == today, 'sent_at': '', 'note': note, 'selectable': False,
+        })
+    order = {'ready': 0, 'queued': 1, 'sent': 2, 'attention': 3}
+    leads.sort(key=lambda lead: order[lead['stage']])
+    return leads
+
+
 @app.get('/')
 def home():
+    from automatic_research import is_running
+
+    now = datetime.now(TIMEZONE)
+    today = now.date().isoformat()
     with conn() as c:
-        contacts=c.execute("""SELECT * FROM contacts
-            WHERE status IN ('draft','approved')
-               OR id IN (SELECT id FROM contacts ORDER BY id DESC LIMIT 300)
-            ORDER BY id DESC""").fetchall()
-        counts=dict(c.execute('SELECT status, count(*) n FROM contacts GROUP BY status').fetchall())
-        suppressed_emails = {row['email'].lower() for row in c.execute('SELECT email FROM suppression')}
-    selectable = {
-        r['id'] for r in contacts
-        if r['status'] == 'draft' and complete_message(r['subject'], r['body'])
-        and not DIRECTORY_TITLE.search(r['company'])
-        and r['email'].lower() not in suppressed_emails
+        leads = build_leads(c, now)
+        sent_today = c.execute("SELECT count(*) FROM contacts WHERE status='sent' AND sent_at >= ?",
+                               (day_start_utc(now),)).fetchone()[0]
+        sent_total = c.execute("SELECT count(*) FROM contacts WHERE status='sent'").fetchone()[0]
+        found = c.execute("""SELECT count(*), coalesce(sum(email != ''), 0) FROM prospects
+                             WHERE substr(found_at,1,10)=?""", (today,)).fetchone()
+        searches_today = c.execute('SELECT coalesce(sum(searches),0) FROM research_runs WHERE day=?',
+                                   (today,)).fetchone()[0]
+        latest = c.execute('SELECT * FROM research_runs ORDER BY id DESC LIMIT 1').fetchone()
+    counts = {stage: sum(1 for lead in leads if lead['stage'] == stage)
+              for stage in ('ready', 'queued', 'sent', 'attention')}
+    counts['sent'] = sent_total
+    auto_send = os.getenv('AUTO_SEND', '0') == '1'
+    send_hour, send_minute, send_limit = auto_send_settings()
+    search_hour, search_minute = map(int, os.getenv('RESEARCH_TIME', '09:00').split(':'))
+    with conn() as c:
+        used_today = c.execute('SELECT count(*) FROM send_log WHERE sent_at >= ?', (day_start_utc(now),)).fetchone()[0]
+        scheduled_today = c.execute('SELECT 1 FROM research_runs WHERE day=? AND manual=0', (today,)).fetchone()
+        stuck = c.execute("SELECT count(*) FROM contacts WHERE status='uncertain'").fetchone()[0]
+    autopilot = {
+        'on': auto_send, 'limit': send_limit, 'used_today': used_today,
+        'approve': os.getenv('AUTO_APPROVE', '1') == '1',
+        'next_send': next_slot(now, send_hour, send_minute, done_today=used_today >= send_limit),
+        'send_time': f'{send_hour:02d}:{send_minute:02d}',
+        'next_search': next_slot(now, search_hour, search_minute, done_today=bool(scheduled_today)),
+        'stuck': stuck,
     }
     return studio_page(
-        'dashboard.html', 'Overview', contacts=contacts, total=sum(counts.values()),
-        drafts=counts.get('draft', 0), approved=counts.get('approved', 0), sent=counts.get('sent', 0),
-        subject=SUBJECT, template=BODY, auto_send=os.getenv('AUTO_SEND', '0') == '1',
-        schedule=os.getenv('RESEARCH_TIME', '09:00'), selectable=selectable, token=permission_token(),
+        'dashboard.html', 'Leads', leads=leads, counts=counts, sent_today=sent_today,
+        found_today=found[0], found_today_emails=found[1], searches_today=searches_today, latest=latest,
+        running=is_running(), token=permission_token(), limit=SEND_BATCH_LIMIT,
+        auto_send=auto_send, autopilot=autopilot,
+        enabled=os.getenv('RESEARCH_AUTOMATION', '1') == '1',
+        configured=bool(os.getenv('TAVILY_API_KEY', '').strip()),
+        schedule=os.getenv('RESEARCH_TIME', '09:00'),
     )
+
+
+@app.get('/status.json')
+def status_json():
+    """Small live-status feed for the Leads page: credits come from Tavily (cached)."""
+    from automatic_research import daily_search_budget, is_running
+
+    now = datetime.now(TIMEZONE)
+    with conn() as c:
+        used_today = c.execute('SELECT coalesce(sum(searches),0) FROM research_runs WHERE day=?',
+                               (now.date().isoformat(),)).fetchone()[0]
+    credits = credit_status()
+    budget = daily_search_budget(now, credits['remaining'] + used_today) if credits else None
+    return {'running': is_running(), 'searches_today': used_today, 'daily_budget': budget, 'credits': credits}
 
 
 @app.post('/confirm-selected')
@@ -138,81 +293,104 @@ def confirm_selected():
 @app.post('/research/send')
 def research_send():
     verify_permission_token()
-    return queue_outreach(from_research=True)
+    return queue_outreach()
 
 
-def queue_outreach(*, from_research=False):
-    destination = url_for('research' if from_research else 'home')
+def queue_outreach():
+    """Give permission for the selected drafts and, when asked, start sending them."""
     selected = {int(value) for value in request.form.getlist('ids') if value.isascii() and value.isdigit() and len(value) <= 18}
+    send_now = request.form.get('send_now') == '1'
+    auto_send = os.getenv('AUTO_SEND', '0') == '1'
     if not selected:
-        flash('Select at least one draft.')
-        return redirect(destination)
+        flash('Select at least one business first.')
+        return redirect(url_for('home'))
+    if request.form.get('confirm_permission') != '1':
+        flash('Tick the permission box to confirm these businesses can be emailed.')
+        return redirect(url_for('home'))
+    if send_now:
+        if len(selected) > SEND_BATCH_LIMIT:
+            flash(f'Select at most {SEND_BATCH_LIMIT} businesses to send at once.')
+            return redirect(url_for('home'))
+        try:
+            smtp_config()
+        except RuntimeError as exc:
+            flash(str(exc))
+            return redirect(url_for('home'))
     now = datetime.now(timezone.utc).isoformat()
-    confirmed = 0
+    approved = []
     with conn() as db:
         db.execute('BEGIN IMMEDIATE')
         rows = db.execute("""SELECT * FROM contacts WHERE status='draft'
             AND NOT EXISTS (SELECT 1 FROM suppression WHERE email=contacts.email)
-            AND (? = 0 OR EXISTS (SELECT 1 FROM prospects WHERE prospects.email=contacts.email COLLATE NOCASE))
-            ORDER BY id""", (int(from_research),))
+            ORDER BY id""")
         for row in rows.fetchall():
             if (row['id'] in selected and complete_message(row['subject'], row['body'])
                     and not DIRECTORY_TITLE.search(row['company'])):
                 basis, evidence = confirmed_permission(row, now)
                 db.execute("""UPDATE contacts SET status='approved', consent_basis=?,
                     consent_evidence=? WHERE id=?""", (basis, evidence, row['id']))
-                confirmed += 1
-    if confirmed and os.getenv('AUTO_SEND', '0') == '1':
-        flash(f'{confirmed} emails queued for sending.')
-    else:
-        flash(f'Permission confirmed for {confirmed} drafts.')
-    return redirect(destination)
+                approved.append(row['id'])
+    if not approved:
+        flash('Nothing was approved. Those drafts may already be handled or need finishing.')
+        return redirect(url_for('home'))
+    skipped = len(selected) - len(approved)
+    extra = f' {skipped} skipped (already handled or incomplete).' if skipped else ''
+    if send_now:
+        Thread(target=send_batch, args=(approved,), daemon=True).start()
+        flash(f'{len(approved)} approved. Sending now, about {send_delay():g}s apart.{extra}')
+        return redirect(url_for('send'))
+    if auto_send:
+        hour, minute, limit = auto_send_settings()
+        flash(f'{len(approved)} approved. They go out at the next {hour:02d}:{minute:02d} send, up to {limit} a day.{extra}')
+        return redirect(url_for('home'))
+    flash(f'{len(approved)} approved and waiting on the Sending page.{extra}')
+    return redirect(url_for('home'))
+
+
+@app.post('/skip')
+def skip_selected():
+    """Take drafts out of the queue so autopilot never sends them."""
+    verify_permission_token()
+    selected = [int(v) for v in request.form.getlist('ids') if v.isascii() and v.isdigit() and len(v) <= 18]
+    if not selected:
+        flash('Select at least one business first.')
+        return redirect(url_for('home'))
+    with conn() as db:
+        marks = ','.join('?' * len(selected))
+        n = db.execute(f"UPDATE contacts SET status='skipped' WHERE status IN ('draft','approved') AND id IN ({marks})",
+                       selected).rowcount
+    flash(f'Skipped {n}. They will not be emailed.')
+    return redirect(url_for('home'))
 
 
 @app.route('/research', methods=['GET'])
 def research():
-    other = request.args.get('view') == 'other'
-    condition = "p.email = ''" if other else "p.email != ''"
-    visible = """FROM prospects p LEFT JOIN contacts c ON c.email=p.email COLLATE NOCASE
-        WHERE COALESCE(c.status,'') NOT IN ('sent','suppressed')
-        AND NOT EXISTS (SELECT 1 FROM suppression s WHERE s.email=p.email COLLATE NOCASE)"""
-    with conn() as c:
-        prospects=c.execute(f"""SELECT p.*,c.id AS contact_id,c.status AS contact_status,c.subject,c.body
-            {visible} AND {condition}
-            ORDER BY CASE WHEN c.status='draft' THEN 0 ELSE 1 END, c.id, p.id DESC LIMIT 300""").fetchall()
-        count=c.execute(f'SELECT COUNT(*) {visible}').fetchone()[0]
-        ready=c.execute(f"SELECT COUNT(*) {visible} AND p.email != ''").fetchone()[0]
-        latest = c.execute('SELECT * FROM research_runs ORDER BY id DESC LIMIT 1').fetchone()
-    selectable = {
-        row['contact_id'] for row in prospects if row['contact_status'] == 'draft'
-        and complete_message(row['subject'], row['body']) and not DIRECTORY_TITLE.search(row['company'])
-    }
-    return studio_page(
-        'research.html', 'Research', prospects=prospects, count=count, ready=ready, latest=latest, other=other,
-        selectable=selectable, token=permission_token(), auto_send=os.getenv('AUTO_SEND', '0') == '1',
-        enabled=os.getenv('RESEARCH_AUTOMATION', '1') == '1',
-        configured=bool(os.getenv('TAVILY_API_KEY', '').strip()),
-        schedule=os.getenv('RESEARCH_TIME', '09:00'),
-    )
+    return redirect(url_for('home'))
 
 
 @app.post('/research/automatic')
 def research_automatic():
-    from automatic_research import start_search
+    from automatic_research import is_running, start_search
 
-    if os.getenv('TAVILY_API_KEY', '').strip():
+    if not os.getenv('TAVILY_API_KEY', '').strip():
+        flash('Add your Tavily API key to .env to search for businesses.')
+    elif is_running():
+        flash('A search is already running.')
+    else:
         start_search()
-        flash('Search requested. Refresh this page to see the run and its results.')
-    return redirect('/research')
+        time.sleep(0.3)
+        flash('Searching now. New businesses appear here as soon as their websites are checked.')
+    return redirect(url_for('home'))
 
 
 def save_prospects(leads):
     added_ids = []
+    found_at = datetime.now(TIMEZONE).isoformat(timespec='seconds')
     with conn() as c:
         for lead in leads:
             cur = c.execute(
-                'INSERT OR IGNORE INTO prospects(domain,company,website,snippet,source_url) VALUES(?,?,?,?,?)',
-                (lead['domain'], lead['company'], lead['url'], lead['snippet'], lead['source_url']),
+                'INSERT OR IGNORE INTO prospects(domain,company,website,snippet,source_url,found_at) VALUES(?,?,?,?,?,?)',
+                (lead['domain'], lead['company'], lead['url'], lead['snippet'], lead['source_url'], found_at),
             )
             if cur.rowcount:
                 added_ids.append(cur.lastrowid)
@@ -254,13 +432,14 @@ def prepare_website_drafts():
 
 
 def enrich_prospects(prospect_ids, *, retry=False):
-    found = inspected = 0
+    """Check company websites for a published email. Four sites are checked at a time."""
     condition = "researched=1 AND email='' AND status='discovered'" if retry else 'researched=0'
-    for prospect_id in prospect_ids:
+
+    def check(prospect_id):
         with conn() as c:
             row = c.execute(f'SELECT website FROM prospects WHERE id=? AND {condition}', (prospect_id,)).fetchone()
         if row is None:
-            continue
+            return 0, 0
         info = inspect_company_site(row['website'])
         with conn() as c:
             result = c.execute(
@@ -269,24 +448,30 @@ def enrich_prospects(prospect_ids, *, retry=False):
                 (info['email'], info['observation'], info['source'], info.get('observation_source', ''),
                  info.get('status', 'email_not_found'), prospect_id),
             )
-        inspected += result.rowcount
-        found += result.rowcount if info['email'] else 0
-    return inspected, found
+        return result.rowcount, result.rowcount if info['email'] else 0
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(check, prospect_ids))
+    return sum(r[0] for r in results), sum(r[1] for r in results)
 
 @app.post('/research/find')
 def research_find():
+    from automatic_research import is_running, start_custom_search
+
     industry=(request.form.get('industry') or '').strip()[:90]
     location=(request.form.get('location') or '').strip()[:90]
     if not industry or not location: abort(400)
     try:target=max(1,min(int(request.form.get('target','40')),60))
     except ValueError:target=40
-    try:
-        with search_allowance() as remaining:
-            found = find_companies(industry, location, target, max_searches=min(3, remaining))
-    except Exception as e:flash('Search could not complete: '+str(e)[:200]);return redirect('/research')
-    added, _ = save_prospects(found)
-    flash(f'Found {len(found)} results; added {added} new company sites. Click Inspect next 10 websites to find public company emails.')
-    return redirect('/research')
+    if not os.getenv('TAVILY_API_KEY', '').strip():
+        flash('Add your Tavily API key to .env to search for businesses.')
+    elif is_running():
+        flash('A search is already running.')
+    else:
+        start_custom_search(industry, location, target)
+        time.sleep(0.3)
+        flash(f'Searching for {industry} in {location}. New businesses appear on Leads as their websites are checked.')
+    return redirect(url_for('home'))
 
 @app.post('/research/enrich')
 def research_enrich():
@@ -296,14 +481,25 @@ def research_enrich():
         order = 'DESC' if retry else 'ASC'
         ids = [row['id'] for row in c.execute(f'SELECT id FROM prospects WHERE {condition} ORDER BY id {order} LIMIT ?', (3 if retry else 10,))]
     inspected, found = enrich_prospects(ids, retry=retry)
-    flash(f'Researched {inspected} company websites and found {found} public business-domain email addresses.')
-    return redirect(url_for('research', view='other')) if retry else redirect('/research')
+    flash(f'Checked {inspected} company websites and found {found} public business-domain email addresses.')
+    return redirect(url_for('tools'))
 
 @app.post('/research/draft')
 def research_draft():
     count = prepare_website_drafts()
     flash(f'Prepared {count} drafts with your outreach template.')
-    return redirect('/research')
+    return redirect(url_for('home'))
+
+@app.get('/tools')
+def tools():
+    with conn() as c:
+        runs = c.execute('SELECT * FROM research_runs ORDER BY id DESC LIMIT 12').fetchall()
+    return studio_page(
+        'tools.html', 'Tools', runs=runs, subject=SUBJECT, template=BODY,
+        configured=bool(os.getenv('TAVILY_API_KEY', '').strip()),
+        enabled=os.getenv('RESEARCH_AUTOMATION', '1') == '1',
+        schedule=os.getenv('RESEARCH_TIME', '09:00'), auto_send=os.getenv('AUTO_SEND', '0') == '1',
+    )
 
 @app.get('/sample.csv')
 def sample():
@@ -337,8 +533,8 @@ def generate():
     with conn() as c:
         rows=c.execute("SELECT * FROM contacts WHERE status='draft'").fetchall()
         for r in rows:c.execute('UPDATE contacts SET subject=?,body=? WHERE id=?',(draft_text(subject,r),draft_text(body,r),r['id']))
-    flash(f'Created/updated {len(rows)} drafts. Review individually before approving.')
-    return redirect('/')
+    flash(f'Updated {len(rows)} drafts with the new template.')
+    return redirect(url_for('tools'))
 
 @app.route('/contact/<int:cid>',methods=['GET','POST'])
 def contact(cid):
@@ -467,7 +663,7 @@ def send_message(to,subject,body):
         return f'HMail Plus accepted the email, but saving a copy to Sent could not be confirmed ({type(exc).__name__}).'
     return None
 
-def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None):
+def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None, auto_evidence=None):
     """Reserve a recipient before SMTP so simultaneous or interrupted runs cannot resend."""
     now = datetime.now(timezone.utc).isoformat()
     with conn() as db:
@@ -479,7 +675,8 @@ def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None):
                    AND length(trim(consent_evidence)) >= 8
                    AND length(trim(subject)) > 0 AND length(trim(body)) > 0))
               AND NOT EXISTS (SELECT 1 FROM suppression WHERE email=contacts.email)
-        """, (contact_id, scheduled or confirmed_draft is not None, confirmed_draft is not None)).fetchone()
+        """, (contact_id, scheduled or confirmed_draft is not None,
+              confirmed_draft is not None or auto_evidence is not None)).fetchone()
         if row is None or (scheduled and DIRECTORY_TITLE.search(row['company'])):
             return 'skipped'
         if confirmed_draft is None and not complete_message(row['subject'], row['body']):
@@ -490,6 +687,11 @@ def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None):
             db.execute("""UPDATE contacts SET status='sending', subject=?, body=?,
                 consent_basis=?, consent_evidence=? WHERE id=?""",
                 (subject, body, basis, evidence, contact_id))
+        elif auto_evidence is not None:
+            # Autopilot: recorded honestly as a published business email, not as given consent.
+            subject, body = row['subject'], row['body']
+            db.execute("UPDATE contacts SET status='sending', consent_basis='published_business_email', consent_evidence=? WHERE id=?",
+                       (auto_evidence, contact_id))
         else:
             subject, body = row['subject'], row['body']
             db.execute("UPDATE contacts SET status='sending' WHERE id=?", (contact_id,))
@@ -529,25 +731,23 @@ def test():
 @app.route('/send',methods=['GET','POST'])
 def send():
     auto_send = os.getenv('AUTO_SEND', '0') == '1'
+    if request.method=='POST':
+        verify_permission_token()
+        requested=[int(x) for x in request.form.getlist('ids') if x.isascii() and x.isdigit() and len(x) <= 18]
+        if not requested:flash('Select at least one email.');return redirect(url_for('send'))
+        if len(requested) > SEND_BATCH_LIMIT:
+            flash(f'Select at most {SEND_BATCH_LIMIT} emails to send at once.');return redirect(url_for('send'))
+        try:smtp_config()
+        except Exception as e:flash(str(e));return redirect(url_for('send'))
+        Thread(target=send_batch, args=(requested,), daemon=True).start()
+        flash(f'Sending {len(requested)} emails, about {send_delay():g}s apart. This page updates by itself.')
+        return redirect(url_for('send'))
     with conn() as c:
         rows=c.execute("SELECT * FROM contacts WHERE status IN ('approved','sending','uncertain') AND email NOT IN (SELECT email FROM suppression) ORDER BY id").fetchall()
-    if request.method=='POST':
-        requested=[int(x) for x in request.form.getlist('ids') if x.isdigit()][:20]
-        if not requested:flash('Select at least one email.');return redirect('/send')
-        try:smtp_config()
-        except Exception as e:flash(str(e));return redirect('/send')
-        sent=failed=0
-        for cid in requested:
-            result = submit_contact(cid)
-            if result == 'submitted':
-                sent += 1
-                time.sleep(max(0, min(float(os.getenv('SEND_DELAY_SECONDS', '3')), 60)))
-            elif result == 'uncertain':
-                failed += 1
-                break
-        flash(f'SMTP accepted {sent} emails; {failed} failed. A successful SMTP submission does not guarantee inbox delivery.')
-        return redirect('/')
-    return studio_page('sending.html', 'Sending', rows=rows, auto_send=auto_send)
+        recent=c.execute("SELECT * FROM contacts WHERE status='sent' ORDER BY sent_at DESC LIMIT 15").fetchall()
+    return studio_page('sending.html', 'Sending', rows=rows, recent=recent, auto_send=auto_send,
+                       token=permission_token(), limit=SEND_BATCH_LIMIT,
+                       busy=any(r['status']=='sending' for r in rows))
 
 @app.route('/suppression',methods=['GET','POST'])
 def suppression():

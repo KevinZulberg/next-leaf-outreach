@@ -1,19 +1,48 @@
 <div class="page-heading">
-    <div><h1>Sending queue</h1><p>When automatic sending is on, approved drafts send in the background.</p></div>
+    <div><h1>Sending</h1><p>{% if auto_send %}Autopilot sends the queue every Monday to Thursday. Anything here goes out at the next send.{% else %}Approved emails wait here until you send them.{% endif %}</p></div>
     <a class="btn secondary" href="{{ url_for('test') }}">Send a test email</a>
 </div>
-<section class="panel queue">
-        <div class="panel-heading queue-heading"><div><h2>Approved drafts</h2><p>These drafts are queued for automatic sending.</p></div></div>
-    <form method="post">
-        {% if not auto_send %}<div class="selection-bar"><button {% if not rows %}disabled{% endif %}>Send selected now</button></div>{% endif %}
-        <div class="tablewrap" tabindex="0" aria-label="Approved drafts">
-            <table><thead><tr><th scope="col">Status</th><th scope="col">Recipient</th><th scope="col">Subject</th></tr></thead>
-                <tbody>{% for r in rows %}<tr>
-                    <td>{% if not auto_send and r.status == 'approved' %}<input class="check" name="ids" type="checkbox" value="{{ r.id }}" aria-label="Select {{ r.company }}">{% endif %}
-                    <span class="tag tag-{{ r.status }}">{{ r.status|capitalize }}</span></td>
-                    <td><strong>{{ r.company }}</strong><small>{{ r.email }}</small></td><td>{{ r.subject }}</td>
-                </tr>{% else %}<tr><td colspan="3" class="empty">No approved drafts are ready to send.</td></tr>{% endfor %}</tbody>
-            </table>
+{% if busy %}<div class="banner running" data-autorefresh="5000"><span class="spinner" aria-hidden="true"></span>Emails are going out. This page refreshes by itself.</div>{% endif %}
+
+<section class="panel flush">
+    <form method="post" id="send-form">
+        <input type="hidden" name="permission_token" value="{{ token }}">
+        <div class="toolbar">
+            <div><h2>Queued ({{ rows|length }})</h2></div>
+            {% if rows %}
+            <div class="actions">
+                <label class="check-all"><input class="check" type="checkbox" id="send-all" {% if rows|length <= limit %}checked{% endif %}> All</label>
+                <span class="help" id="send-count"></span>
+                <button id="send-selected" disabled>Send selected now</button>
+            </div>
+            {% endif %}
         </div>
+        {% for r in rows %}
+        <div class="lead simple">
+            <div class="check-slot">{% if r.status == 'approved' %}<input class="check" name="ids" type="checkbox" value="{{ r.id }}" aria-label="Select {{ r.company }}" {% if loop.index <= limit %}checked{% endif %}>{% endif %}</div>
+            <div><div class="lead-name">{{ r.company }}</div><div class="lead-meta">{{ r.email }}</div></div>
+            <div class="lead-email">{{ r.subject }}{% if r.error %}<small>{{ r.error }}</small>{% endif %}</div>
+            <div class="lead-state"><span class="tag tag-{{ r.status }}">{{ {'approved': 'Approved', 'sending': 'Sending', 'uncertain': 'Check delivery'}.get(r.status, r.status|capitalize) }}</span></div>
+            <div class="lead-action"><a class="btn secondary small" href="{{ url_for('contact', cid=r.id) }}">View</a></div>
+        </div>
+        {% else %}
+        <div class="empty"><strong>Nothing queued</strong>Approved emails and emails being sent show up here.</div>
+        {% endfor %}
     </form>
+</section>
+<p class="help" style="margin: -4px 4px 20px">Up to {{ limit }} emails can be sent by hand at once. A successful send means the mail server accepted it, not that it reached an inbox. Emails marked <em>Check delivery</em> are never retried automatically.</p>
+
+<section class="panel flush">
+    <div class="toolbar"><h2>Recently sent</h2></div>
+    {% for r in recent %}
+    <div class="lead simple">
+        <div class="check-slot"></div>
+        <div><div class="lead-name">{{ r.company }}</div><div class="lead-meta">{{ r.email }}</div></div>
+        <div class="lead-email">{{ r.subject }}</div>
+        <div class="lead-state"><span class="tag tag-sent">Sent {{ r.sent_at[:10] }}</span></div>
+        <div class="lead-action"><a class="btn secondary small" href="{{ url_for('contact', cid=r.id) }}">View</a></div>
+    </div>
+    {% else %}
+    <div class="empty"><strong>No emails sent yet</strong></div>
+    {% endfor %}
 </section>

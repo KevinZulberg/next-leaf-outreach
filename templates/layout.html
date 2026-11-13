@@ -3,43 +3,31 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ page_title or 'Outreach Studio' }} · Nextleaf</title>
+    <title>{{ page_title or 'Outreach' }} · Nextleaf</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='studio.css') }}">
     <script defer src="{{ url_for('static', filename='studio.js') }}"></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
-<div class="shell">
-    <aside class="sidebar">
-        <a class="brand" href="{{ url_for('home') }}">
-            <span class="brand-mark"><img src="{{ url_for('studio_logo') }}" alt=""></span>
-            <span><strong>Nextleaf</strong><small>Outreach Studio</small></span>
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="brand" href="{{ url_for('home') }}" aria-label="Nextleaf Outreach home">
+            <img src="{{ url_for('studio_logo') }}" alt="Nextleaf Digital" height="34">
+            <span class="brand-sub">Outreach</span>
         </a>
-        <nav aria-label="Workspace">
-            {% for endpoint, label, symbol in [('home', 'Overview', '◫'), ('research', 'Research', '⌕'), ('send', 'Sending', '↗'), ('suppression', 'Opt-outs', '⊘')] %}
-            {% set active = request.endpoint == endpoint or (endpoint == 'home' and request.endpoint == 'contact') or (endpoint == 'send' and request.endpoint == 'test') %}
-            <a class="nav-item{% if active %} active{% endif %}" href="{{ url_for(endpoint) }}" {% if active %}aria-current="page"{% endif %}>
-                <span class="nav-icon" aria-hidden="true">{{ symbol }}</span>{{ label }}
-            </a>
+        <nav aria-label="Main">
+            {% for endpoint, label in [('home', 'Leads'), ('send', 'Sending'), ('suppression', 'Opt-outs'), ('tools', 'Tools')] %}
+            {% set active = request.endpoint == endpoint or (endpoint == 'home' and request.endpoint in ('contact', 'research')) or (endpoint == 'send' and request.endpoint == 'test') %}
+            <a class="nav-link{% if active %} active{% endif %}" href="{{ url_for(endpoint) }}" {% if active %}aria-current="page"{% endif %}>{{ label }}</a>
             {% endfor %}
         </nav>
-        <div class="sidebar-bottom">
-            <a class="nav-item" href="{{ url_for('export') }}"><span class="nav-icon" aria-hidden="true">↓</span> Export CSV</a>
-            <div class="workspace-status"><span></span> Private workspace</div>
-        </div>
-    </aside>
-    <div class="workspace">
-        <header class="topbar">
-            <div><span class="breadcrumb-root">Workspace</span><span class="breadcrumb-divider" aria-hidden="true">/</span><strong>{{ page_title or 'Outreach Studio' }}</strong></div>
-            <span class="timezone"><span aria-hidden="true">◷</span> South Africa · SAST</span>
-        </header>
-        <main class="container" id="main">
-            {% for message in get_flashed_messages() %}
-            <div class="alert" role="status">{{ message }}</div>
-            {% endfor %}
-            {{ body|safe }}
-        </main>
     </div>
-</div>
+</header>
+<main class="container" id="main">
+    {% for message in get_flashed_messages() %}
+    <div class="alert" role="status">{{ message }}</div>
+    {% endfor %}
+    {{ body|safe }}
+</main>
 </body>
 </html>

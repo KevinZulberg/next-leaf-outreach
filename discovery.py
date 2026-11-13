@@ -8,6 +8,7 @@ import json
 import os
 import re
 import socket
+import time
 from contextlib import contextmanager
 from html.parser import HTMLParser
 from threading import Lock
@@ -18,7 +19,16 @@ import requests
 
 UA = 'NextleafResearchAssistant/1.0 (business discovery; respects robots.txt)'
 SEARCH_LOCK = Lock()
-MONTHLY_SEARCH_CREDITS = 1500
+DEFAULT_MONTHLY_CREDITS = 1000
+_CREDIT_CACHE = {'at': 0.0, 'value': None}
+
+
+def monthly_credits():
+    """Credits this app may use per month (TAVILY_MONTHLY_CREDITS, default 1000)."""
+    try:
+        return max(1, int(os.getenv('TAVILY_MONTHLY_CREDITS', DEFAULT_MONTHLY_CREDITS)))
+    except ValueError:
+        return DEFAULT_MONTHLY_CREDITS
 EMAIL_RE = re.compile(r'\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b', re.I)
 EXCLUDE = ('facebook.com', 'instagram.com', 'linkedin.com', 'youtube.com',
            'tiktok.com', 'x.com', 'twitter.com', 'yelp.', 'yellowpages.',
@@ -239,10 +249,41 @@ def search_allowance():
         response.raise_for_status()
         usage = response.json()
         account, api_key = usage['account'], usage['key']
-        remaining = min(account['plan_limit'], MONTHLY_SEARCH_CREDITS) - account['plan_usage']
+        remaining = min(account['plan_limit'], monthly_credits()) - account['plan_usage']
         if api_key.get('limit') is not None:
             remaining = min(remaining, api_key['limit'] - api_key['usage'])
         yield max(0, remaining)
+
+
+def credit_status(max_age=600):
+    """Credits used/left this month, cached so pages never wait on Tavily. None if unknown."""
+    key = os.getenv('TAVILY_API_KEY', '').strip()
+    if not key:
+        return None
+    now = time.time()
+    if now - _CREDIT_CACHE['at'] < max_age:
+        return _CREDIT_CACHE['value']
+    value = None
+    try:
+        response = requests.get('https://api.tavily.com/usage',
+                                headers={'Authorization': f'Bearer {key}'}, timeout=5)
+        response.raise_for_status()
+        usage = response.json()
+        account, api_key = usage['account'], usage['key']
+        limit = min(account['plan_limit'], monthly_credits())
+        used = account['plan_usage']
+        if api_key.get('limit') is not None:
+            limit = min(limit, api_key['limit'])
+            used = max(used, api_key['usage'])
+        value = {'limit': limit, 'used': used, 'remaining': max(0, limit - used)}
+    except (requests.RequestException, KeyError, TypeError, ValueError):
+        pass
+    _CREDIT_CACHE.update(at=now if value else now - max_age + 120, value=value)
+    return value
+
+
+def forget_credit_cache():
+    _CREDIT_CACHE['at'] = 0.0
 
 
 def tavily_search(query, max_results=20):
@@ -252,7 +293,7 @@ def tavily_search(query, max_results=20):
     r.raise_for_status()
     return r.json().get('results',[])
 
-def find_companies(industry, location, target, max_searches):
+def find_companies(industry, location, target, max_searches, on_search=None):
     """One foreground request. No 200-site crawl at once; user can run again."""
     seen=set(); leads=[]
     phrases=[f'{industry} companies in {location} official website',
@@ -262,6 +303,7 @@ def find_companies(industry, location, target, max_searches):
              f'{industry} businesses {location} contact us']
     for i in range(min(max_searches,5)):
         results=tavily_search(phrases[i],20)
+        if on_search:on_search()
         for r in results:
             u=(r.get('url') or '').strip();p=urlparse(u)
             if p.scheme!='https' or not p.hostname:continue

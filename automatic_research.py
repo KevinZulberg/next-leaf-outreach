@@ -1,16 +1,18 @@
-"""Weekday business discovery for the local Outreach Studio."""
+"""Business discovery for Outreach Studio: scheduled daily runs plus on-demand runs.
+
+Every run does the whole job: search -> check each new website for a published
+company email -> write drafts. Nothing is approved or sent automatically.
+"""
 import logging
 import os
 from calendar import monthrange
 from contextlib import closing
 from datetime import datetime, timedelta
 from threading import Lock, Thread
-from zoneinfo import ZoneInfo
 
-from app import conn, enrich_prospects, prepare_website_drafts, save_prospects
-from discovery import find_companies, search_allowance
+from app import TIMEZONE, conn, enrich_prospects, prepare_website_drafts, save_prospects
+from discovery import find_companies, forget_credit_cache, search_allowance
 
-TIMEZONE = ZoneInfo('Africa/Johannesburg')
 REGIONS = (
     'Johannesburg and Gauteng', 'Cape Town and Western Cape',
     'Durban and KwaZulu-Natal', 'Gqeberha and Eastern Cape',
@@ -27,14 +29,32 @@ INDUSTRIES = (
     'sheet metal and structural steel fabrication',
 )
 RUN_LOCK = Lock()
+MANUAL_SEARCHES = 3      # searches used by one click of "Find businesses now"
+PENDING_PER_RUN = 40     # older, never-checked websites picked up by each run
 
 
-def daily_search_budget(now, remaining):
-    search_days = sum(
+def search_days_left(now):
+    """Scheduled search days (Monday-Thursday) left this month, including today."""
+    return sum(
         1 for day in range(now.day, monthrange(now.year, now.month)[1] + 1)
         if now.replace(day=day).weekday() < 4
     )
-    return (remaining + search_days - 1) // search_days if search_days else 0
+
+
+def daily_search_budget(now, remaining):
+    """Searches for one scheduled run: spread the remaining credits over the days left.
+
+    RESEARCH_DAILY_SEARCHES, when set, is a hard ceiling per day.
+    """
+    days = search_days_left(now)
+    budget = (remaining + days - 1) // days if days else 0
+    try:
+        ceiling = int(os.getenv('RESEARCH_DAILY_SEARCHES', '') or 0)
+    except ValueError:
+        ceiling = 0
+    if ceiling > 0:
+        budget = min(budget, ceiling)
+    return max(0, min(budget, remaining))
 
 
 def settings():
@@ -44,7 +64,17 @@ def settings():
     return hour, minute
 
 
-def run_search(manual=False):
+def is_running():
+    return RUN_LOCK.locked()
+
+
+def _finish(run_id, status):
+    with closing(conn()) as db, db:
+        db.execute('UPDATE research_runs SET status=? WHERE id=?', (status, run_id))
+
+
+def run_search(manual=False, custom=None):
+    """One research run. `custom` is (industry, location, target) for a specific search."""
     if not os.getenv('TAVILY_API_KEY', '').strip() or not RUN_LOCK.acquire(blocking=False):
         return
     run_id = None
@@ -66,45 +96,67 @@ def run_search(manual=False):
                 if db.execute('SELECT 1 FROM research_runs WHERE day=? AND manual=0', (day,)).fetchone():
                     return
             index = (latest['id'] if latest else 0) * 97
-        domains = set()
-        prospect_ids = []
-        with search_allowance() as remaining:
+            region, industry = ('South Africa', 'Multiple industries')
+            if custom:
+                industry, region = custom[0], custom[1]
+            run_id = db.execute(
+                """INSERT INTO research_runs(day, manual, started_at, region, industry, status)
+                   VALUES(?,?,?,?,?,'running')""",
+                (day, int(manual), now.isoformat(), region, industry),
+            ).lastrowid
+
+        def count_search():
             with closing(conn()) as db, db:
-                run_id = db.execute(
-                    """INSERT INTO research_runs(day, manual, started_at, region, industry, status)
-                       VALUES(?,?,?,?,?,'running')""",
-                    (day, int(manual), now.isoformat(), 'South Africa', 'Multiple industries'),
-                ).lastrowid
-            search_budget = min(3, remaining) if manual else daily_search_budget(now, remaining)
-            for offset in range(search_budget):
-                position = index + offset
-                region = REGIONS[position % len(REGIONS)]
-                industry = INDUSTRIES[position % len(INDUSTRIES)]
-                leads = find_companies(industry, f'{region}, South Africa', 20, max_searches=1)
-                new_leads = [lead for lead in leads if lead['domain'] not in domains]
-                domains.update(lead['domain'] for lead in new_leads)
-                _, new_ids = save_prospects(new_leads)
-                prospect_ids.extend(new_ids)
-        added = len(prospect_ids)
-        inspected, emails = enrich_prospects(prospect_ids)
+                db.execute('UPDATE research_runs SET searches=searches+1 WHERE id=?', (run_id,))
+
+        domains = set()
+        new_ids = []
+        with search_allowance() as remaining:
+            if custom:
+                leads = find_companies(custom[0], custom[1], custom[2],
+                                       max_searches=min(MANUAL_SEARCHES, remaining), on_search=count_search)
+                domains.update(lead['domain'] for lead in leads)
+                _, new_ids = save_prospects(leads)
+            else:
+                budget = min(MANUAL_SEARCHES, remaining) if manual else daily_search_budget(now, remaining)
+                for offset in range(budget):
+                    position = index + offset
+                    place = REGIONS[position % len(REGIONS)]
+                    trade = INDUSTRIES[position % len(INDUSTRIES)]
+                    leads = find_companies(trade, f'{place}, South Africa', 20, max_searches=1,
+                                           on_search=count_search)
+                    fresh = [lead for lead in leads if lead['domain'] not in domains]
+                    domains.update(lead['domain'] for lead in fresh)
+                    new_ids.extend(save_prospects(fresh)[1])
+        forget_credit_cache()
+
+        # Check the new sites, plus any older ones that were found but never checked.
+        with closing(conn()) as db:
+            pending = [row['id'] for row in db.execute(
+                'SELECT id FROM prospects WHERE researched=0 ORDER BY id LIMIT ?', (PENDING_PER_RUN,))]
+        inspected, emails = enrich_prospects(list(dict.fromkeys(new_ids + pending)))
         prepare_website_drafts()
         with closing(conn()) as db, db:
             db.execute(
                 """UPDATE research_runs SET status='completed', found=?, added=?, inspected=?, emails=?
                    WHERE id=?""",
-                (len(domains), added, inspected, emails, run_id),
+                (len(domains), len(new_ids), inspected, emails, run_id),
             )
     except Exception as exc:
         logging.getLogger(__name__).error('Business search failed (%s)', type(exc).__name__)
         if run_id is not None:
-            with closing(conn()) as db, db:
-                db.execute("UPDATE research_runs SET status='failed' WHERE id=?", (run_id,))
+            _finish(run_id, 'failed')
     finally:
         RUN_LOCK.release()
 
 
 def start_search():
     Thread(target=run_search, kwargs={'manual': True}, daemon=True).start()
+
+
+def start_custom_search(industry, location, target):
+    Thread(target=run_search, kwargs={'manual': True, 'custom': (industry, location, target)},
+           daemon=True).start()
 
 
 def start_scheduler():

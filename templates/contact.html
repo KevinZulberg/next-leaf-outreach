@@ -1,6 +1,6 @@
 <div class="page-heading">
     <div><h1>{{ r.company }}</h1><p>{{ r.email }} <span class="tag tag-{{ r.status }}">{{ r.status|capitalize }}</span></p></div>
-    <a class="btn secondary" href="{{ url_for('home') }}#draft-queue">Back to contact queue</a>
+    <a class="btn secondary" href="{{ url_for('home') }}">← Back to leads</a>
 </div>
 {% if r.status in ('draft', 'approved') %}
 <form method="post" class="editor-grid">

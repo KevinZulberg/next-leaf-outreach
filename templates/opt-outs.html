@@ -1,7 +1,7 @@
-<div class="page-heading"><div><h1>Opt-outs</h1><p>Exclude recipients who have asked to stop receiving emails.</p></div></div>
+<div class="page-heading"><div><h1>Opt-outs</h1><p>Anyone listed here is never emailed again. Add people who reply asking to stop.</p></div></div>
 <div class="editor-grid">
-    <section class="panel queue">
-        <div class="panel-heading queue-heading"><h2>Suppressed addresses</h2></div>
+    <section class="panel flush">
+        <div class="toolbar"><h2>Suppressed addresses ({{ rows|length }})</h2></div>
         <div class="tablewrap" tabindex="0" aria-label="Suppressed addresses">
             <table><thead><tr><th scope="col">Email</th><th scope="col">Reason</th></tr></thead>
                 <tbody>{% for r in rows %}<tr><td>{{ r.email }}</td><td>{{ r.reason }}</td></tr>
@@ -10,7 +10,7 @@
         </div>
     </section>
     <section class="panel">
-        <h2>Add an opt-out</h2>
+        <h2 style="margin-bottom:12px">Add an opt-out</h2>
         <form method="post">
             <label for="opt-out-email">Email address</label><input id="opt-out-email" type="email" name="email" required>
             <label for="opt-out-reason">Reason</label><input id="opt-out-reason" name="reason" type="text" value="Opt-out requested">
