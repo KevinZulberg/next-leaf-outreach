@@ -11,7 +11,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for, flash, Response, abort, session, render_template, send_file
 from markupsafe import Markup
 from blocklist import is_law_firm
-from discovery import credit_status, inspect_company_site
+from discovery import FREE_MAIL, credit_status, inspect_company_site
 
 BASE = Path(__file__).resolve().parent
 TIMEZONE = ZoneInfo('Africa/Johannesburg')
@@ -126,6 +126,26 @@ Yours would be built for {{company}}. Tell me how you currently quote and run jo
 ''' + AARON_SIGNATURE + '''
 
 Not relevant? Reply "no" and I won't email again.'''
+
+def email_domain(email):
+    return (email or '').rsplit('@', 1)[-1].strip().lower()
+
+
+def business_taken(db, email, statuses=None):
+    """True if another address at the same business is already on the list (or already sent to).
+
+    Gmail-style addresses are ignored, since unrelated businesses share those.
+    """
+    domain = email_domain(email)
+    if not domain or domain in FREE_MAIL:
+        return False
+    query = "SELECT 1 FROM contacts WHERE lower(substr(email, instr(email, '@') + 1)) = ? AND lower(email) != lower(?)"
+    params = [domain, email]
+    if statuses:
+        query += f" AND status IN ({','.join('?' * len(statuses))})"
+        params += list(statuses)
+    return db.execute(query + ' LIMIT 1', params).fetchone() is not None
+
 
 def draft_contact(row):
     """Subject and body from the standard template; drops the 'I saw ...' line when there is nothing to say."""
@@ -264,7 +284,7 @@ def build_leads(c, now):
             lead['stage'] = 'ready' if lead['selectable'] else 'attention'
         elif r['status'] == 'skipped':
             lead['stage'] = 'attention'
-            lead['note'] = 'Skipped, will not be emailed'
+            lead['note'] = r['error'] or 'Skipped, will not be emailed'
         elif r['status'] == 'sent':
             lead['stage'] = 'sent'
         else:
@@ -475,6 +495,9 @@ def prepare_website_drafts():
             service = next((service for service in services
                             if re.search(r'\b' + re.escape(service) + r'\b', observation)), None)
             company = ' '.join(row['company'].split())
+            if business_taken(db, row['email']):
+                db.execute('UPDATE prospects SET drafted=1 WHERE id=?', (row['id'],))
+                continue
             if DIRECTORY_TITLE.search(company) or is_law_firm(company, row['email'], row['observation'], row['domain']):
                 db.execute('UPDATE prospects SET drafted=1 WHERE id=?', (row['id'],))
                 continue
@@ -640,12 +663,13 @@ def upload():
     try:reader=csv.DictReader(io.StringIO(file.read().decode('utf-8-sig')))
     except UnicodeDecodeError:abort(400,'CSV must be UTF-8')
     if not reader.fieldnames or not {'company','email'}.issubset(set(reader.fieldnames)):abort(400,'CSV needs company and email')
-    ok=0;skipped=0;law_firms=0
+    ok=0;skipped=0;law_firms=0;same_business=0
     with conn() as c:
         for r in reader:
             email=(r.get('email') or '').strip().lower()
             company=(r.get('company') or '').strip()
             if is_law_firm(company, email, r.get('observation') or ''):law_firms+=1;continue
+            if EMAIL_RE.fullmatch(email) and business_taken(c, email):same_business+=1;continue
             if not EMAIL_RE.fullmatch(email) or not company or c.execute('SELECT 1 FROM suppression WHERE email=?',(email,)).fetchone():skipped+=1;continue
             vals=[company,email,(r.get('contact_name') or '').strip(),(r.get('observation') or '').strip(),(r.get('consent_basis') or '').strip(),(r.get('consent_evidence') or '').strip()]
             cur=c.execute('INSERT OR IGNORE INTO contacts(company,email,contact_name,observation,consent_basis,consent_evidence) VALUES(?,?,?,?,?,?)',vals)
@@ -657,6 +681,8 @@ def upload():
     message = f'Imported {ok} contacts with drafts ready; skipped {skipped} duplicates/invalid/suppressed.'
     if law_firms:
         message += f' Left out {law_firms} law firms, which are never emailed.'
+    if same_business:
+        message += f' Left out {same_business} more addresses at businesses already on the list (one email per business).'
     if ok and cfg['autopilot']:
         days = -(-ok // max(1, cfg['emails_per_day'])) if cfg['emails_per_day'] else 0
         message += f' Autopilot emails them from {next_slot(datetime.now(TIMEZONE), cfg["send_time"], cfg["days"])}, up to {cfg["emails_per_day"]} a day.'
@@ -821,6 +847,9 @@ def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None, auto_ev
               confirmed_draft is not None or auto_evidence is not None)).fetchone()
         if row is not None and is_law_firm(row['company'], row['email'], row['observation']):
             db.execute("UPDATE contacts SET status='skipped' WHERE id=?", (contact_id,))
+            return 'skipped'
+        if row is not None and business_taken(db, row['email'], statuses=('sent', 'sending', 'uncertain')):
+            db.execute("UPDATE contacts SET status='skipped', error='Already emailed another address at this business' WHERE id=?", (contact_id,))
             return 'skipped'
         if row is None or (scheduled and DIRECTORY_TITLE.search(row['company'])):
             return 'skipped'
