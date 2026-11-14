@@ -31,7 +31,7 @@
 <div class="banner error">{{ autopilot.stuck }} email{{ 's' if autopilot.stuck != 1 }} could not be confirmed as sent. <a href="{{ url_for('send') }}">Check the Sending page</a> before anything is retried.</div>
 {% endif %}
 {% if autopilot.on %}
-<div class="banner autopilot"><span class="dot" aria-hidden="true"></span><span><strong>Autopilot is on.</strong> At {{ autopilot.research_time }} it finds businesses (up to {{ autopilot.searches_per_day }} searches), then at {{ autopilot.send_time }} it emails up to {{ autopilot.limit }}. {{ autopilot.days[0]|upper }}{{ autopilot.days[1:] }}. <a href="{{ url_for('settings_page') }}">Change schedule</a></span></div>
+<div class="banner autopilot"><span class="dot" aria-hidden="true"></span><span><strong>Autopilot is on.</strong> At {{ autopilot.research_time }} it finds businesses (up to {{ autopilot.searches_per_day }} searches), then it emails up to {{ autopilot.limit_sa }} in South Africa at {{ autopilot.send_time }}{% if autopilot.limit_uk %} and {{ autopilot.limit_uk }} in the UK at {{ autopilot.uk_send_time }}{% endif %}. {{ autopilot.days[0]|upper }}{{ autopilot.days[1:] }}. <a href="{{ url_for('settings_page') }}">Change schedule</a></span></div>
 {% endif %}
 
 <section class="steps" aria-label="Today at a glance" data-status-url="{{ url_for('status_json') }}" id="steps">
@@ -52,7 +52,7 @@
     <div class="step">
         <div class="step-label"><span class="step-num">3</span> Send</div>
         <div class="step-value">{{ autopilot.used_today }}<small>/ {{ autopilot.limit }} sent today</small></div>
-        <div class="step-detail">{% if autopilot.on %}Next send {{ autopilot.next_send }}{% else %}Automatic sending is off{% endif %}</div>
+        <div class="step-detail">{% if autopilot.on %}SA {{ autopilot.used_sa }}/{{ autopilot.limit_sa }} · UK {{ autopilot.used_uk }}/{{ autopilot.limit_uk }} · next {{ autopilot.next_send }}{% else %}Automatic sending is off{% endif %}</div>
         <div class="meter" aria-hidden="true"><span style="width: {{ [100, (autopilot.used_today * 100 // autopilot.limit) if autopilot.limit else 0]|min }}%"></span></div>
         <div class="step-foot"><span>{{ counts.sent }} sent in total</span><a href="{{ url_for('send') }}">Open Sending</a></div>
     </div>

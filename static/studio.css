@@ -255,3 +255,6 @@ fieldset.days { border: 0; margin: 0 0 18px; padding: 0; min-width: 0; }
 .chip.alt { background: #eceeea; color: #3c4a42; }
 .save-row { display: flex; align-items: center; gap: 14px; margin: 4px 0 30px; }
 @media (max-width: 720px) { .field-row { grid-template-columns: 1fr; } .day span { min-width: 46px; } }
+
+.market { padding: 16px 18px 4px; margin: 0 0 14px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
+.market h3 { font-size: 15px; margin: 0 0 8px; color: var(--green-dark); }

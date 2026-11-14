@@ -148,7 +148,7 @@ if (settingsForm) {
         button.addEventListener('click', () => { settingsForm.elements[button.dataset.set].value = button.dataset.value; });
     }
     const note = document.getElementById('credit-note');
-    const perDay = settingsForm.elements.searches_per_day;
+    const perDay = {get value() { return Number(settingsForm.elements.searches_per_day.value || 0) + Number(settingsForm.elements.uk_searches_per_day.value || 0); }};
     let credits = null;
     const estimate = () => {
         const days = settingsForm.querySelectorAll('input[name="days"]:checked').length;

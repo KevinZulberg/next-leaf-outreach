@@ -158,7 +158,8 @@ def draft_contact(row):
 
 DEFAULT_SETTINGS = {
     'autopilot': '1', 'research_time': '06:00', 'send_time': '08:00', 'days': '0,1,2,3',
-    'searches_per_day': '80', 'emails_per_day': '100', 'delay_seconds': '20', 'send_found': '1',
+    'searches_per_day': '80', 'emails_per_day': '80', 'delay_seconds': '20', 'send_found': '1',
+    'uk_emails_per_day': '20', 'uk_send_time': '11:00', 'uk_searches_per_day': '10',
 }
 DAY_NAMES = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
 TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
@@ -188,6 +189,8 @@ def get_settings():
         'send_time': clock_text('send_time'), 'days': days or [0, 1, 2, 3],
         'searches_per_day': number('searches_per_day', 0, 500), 'emails_per_day': number('emails_per_day', 0, 1000),
         'delay_seconds': number('delay_seconds', 0, 300), 'send_found': raw['send_found'] == '1',
+        'uk_emails_per_day': number('uk_emails_per_day', 0, 1000), 'uk_send_time': clock_text('uk_send_time'),
+        'uk_searches_per_day': number('uk_searches_per_day', 0, 500),
     }
 
 
@@ -209,6 +212,20 @@ def days_text(days):
     if len(days) > 2 and days == list(range(days[0], days[-1] + 1)):
         return f'{DAY_NAMES[days[0]]} to {DAY_NAMES[days[-1]]}'
     return ', '.join(DAY_NAMES[d][:3] for d in days)
+
+
+def market_sql(column):
+    """SQL for 'uk' or 'sa': a business found by the UK search, or any .uk address, counts as UK."""
+    return (f"(CASE WHEN EXISTS (SELECT 1 FROM prospects mp WHERE mp.email = {column} COLLATE NOCASE AND mp.market = 'uk') "
+            f"OR lower({column}) LIKE '%.uk' THEN 'uk' ELSE 'sa' END)")
+
+
+def sent_today_by_market(db, start):
+    """Emails handled today, split into South Africa and UK (uncertain ones count, to stay safe)."""
+    counts = {'sa': 0, 'uk': 0}
+    for row in db.execute(f"SELECT {market_sql('s.email')} AS market, count(*) AS n FROM send_log s WHERE s.sent_at >= ? GROUP BY market", (start,)):
+        counts[row['market']] = row['n']
+    return counts
 
 
 def next_slot(now, text, days, done_today=False):
@@ -333,16 +350,24 @@ def home():
     counts['sent'] = sent_total
     cfg = get_settings()
     with conn() as c:
-        used_today = c.execute('SELECT count(*) FROM send_log WHERE sent_at >= ?', (day_start_utc(now),)).fetchone()[0]
-        scheduled_today = c.execute('SELECT 1 FROM research_runs WHERE day=? AND manual=0', (today,)).fetchone()
+        by_market = sent_today_by_market(c, day_start_utc(now))
+        scheduled_today = c.execute("SELECT 1 FROM research_runs WHERE day=? AND manual=0 AND region != 'United Kingdom'", (today,)).fetchone()
         stuck = c.execute("SELECT count(*) FROM contacts WHERE status='uncertain'").fetchone()[0]
+    used_today = by_market['sa'] + by_market['uk']
+    limit_total = cfg['emails_per_day'] + cfg['uk_emails_per_day']
+    done_all = by_market['sa'] >= cfg['emails_per_day'] and by_market['uk'] >= cfg['uk_emails_per_day']
+    next_sa = next_slot(now, cfg['send_time'], cfg['days'], done_today=by_market['sa'] >= cfg['emails_per_day'])
+    next_uk = next_slot(now, cfg['uk_send_time'], cfg['days'], done_today=by_market['uk'] >= cfg['uk_emails_per_day'])
     autopilot = {
-        'on': cfg['autopilot'], 'limit': cfg['emails_per_day'], 'used_today': used_today,
-        'found_too': cfg['send_found'], 'searches_per_day': cfg['searches_per_day'],
-        'next_send': next_slot(now, cfg['send_time'], cfg['days'], done_today=used_today >= cfg['emails_per_day']),
-        'send_time': cfg['send_time'], 'research_time': cfg['research_time'], 'days': days_text(cfg['days']),
+        'on': cfg['autopilot'], 'limit': limit_total, 'used_today': used_today,
+        'limit_sa': cfg['emails_per_day'], 'limit_uk': cfg['uk_emails_per_day'],
+        'used_sa': by_market['sa'], 'used_uk': by_market['uk'],
+        'found_too': cfg['send_found'], 'searches_per_day': cfg['searches_per_day'] + cfg['uk_searches_per_day'],
+        'next_send': next_sa if cfg['emails_per_day'] or not cfg['uk_emails_per_day'] else next_uk,
+        'send_time': cfg['send_time'], 'uk_send_time': cfg['uk_send_time'], 'research_time': cfg['research_time'],
+        'days': days_text(cfg['days']),
         'next_search': next_slot(now, cfg['research_time'], cfg['days'], done_today=bool(scheduled_today)),
-        'stuck': stuck,
+        'stuck': stuck, 'done_all': done_all,
     }
     return studio_page(
         'dashboard.html', 'Leads', leads=leads, counts=counts, sent_today=sent_today,
@@ -362,7 +387,7 @@ def status_json():
         used_today = c.execute('SELECT coalesce(sum(searches),0) FROM research_runs WHERE day=?',
                                (now.date().isoformat(),)).fetchone()[0]
     cfg = get_settings()
-    return {'running': is_running(), 'searches_today': used_today, 'daily_budget': cfg['searches_per_day'],
+    return {'running': is_running(), 'searches_today': used_today, 'daily_budget': cfg['searches_per_day'] + cfg['uk_searches_per_day'],
             'credits': credit_status()}
 
 
@@ -424,7 +449,7 @@ def queue_outreach():
         flash(f'{len(approved)} approved. Sending now, about {send_delay():g}s apart.{extra}')
         return redirect(url_for('send'))
     if auto_send:
-        flash(f'{len(approved)} approved. They go out at the next {cfg["send_time"]} send, up to {cfg["emails_per_day"]} a day.{extra}')
+        flash(f'{len(approved)} approved. They go out at the next {cfg["send_time"]} send, up to {cfg["emails_per_day"] + cfg["uk_emails_per_day"]} a day.{extra}')
         return redirect(url_for('home'))
     flash(f'{len(approved)} approved and waiting on the Sending page.{extra}')
     return redirect(url_for('home'))
@@ -630,14 +655,16 @@ def settings_page():
         verify_permission_token()
         form = request.form
         problems = []
-        for key, label in (('research_time', 'Search time'), ('send_time', 'Send time')):
+        for key, label in (('research_time', 'Search time'), ('send_time', 'Send time'), ('uk_send_time', 'UK send time')):
             if not TIME_RE.match(form.get(key, '')):
                 problems.append(f'{label} must look like 08:00.')
         days = sorted({int(d) for d in form.getlist('days') if d.isdigit() and 0 <= int(d) <= 6})
         if not days:
             problems.append('Pick at least one day.')
         numbers = {}
-        for key, label, high in (('searches_per_day', 'Searches per day', 500), ('emails_per_day', 'Emails per day', 1000),
+        for key, label, high in (('searches_per_day', 'South Africa searches per day', 500),
+                                 ('emails_per_day', 'South Africa emails per day', 1000),
+                                 ('uk_searches_per_day', 'UK searches per day', 500), ('uk_emails_per_day', 'UK emails per day', 1000),
                                  ('delay_seconds', 'Pause between emails', 300)):
             try:
                 value = int(form.get(key, ''))
@@ -651,7 +678,7 @@ def settings_page():
             return redirect(url_for('settings_page'))
         save_settings({
             'autopilot': '1' if form.get('autopilot') == '1' else '0',
-            'research_time': form['research_time'], 'send_time': form['send_time'],
+            'research_time': form['research_time'], 'send_time': form['send_time'], 'uk_send_time': form['uk_send_time'],
             'days': ','.join(map(str, days)), 'send_found': '1' if form.get('send_found') == '1' else '0', **numbers,
         })
         flash('Settings saved. They apply straight away.')
@@ -707,7 +734,7 @@ def upload():
         message += f' Left out {same_business} more addresses at businesses already on the list (one email per business).'
     if ok and cfg['autopilot']:
         days = -(-ok // max(1, cfg['emails_per_day'])) if cfg['emails_per_day'] else 0
-        message += f' Autopilot emails them from {next_slot(datetime.now(TIMEZONE), cfg["send_time"], cfg["days"])}, up to {cfg["emails_per_day"]} a day.'
+        message += f' Autopilot emails them from {next_slot(datetime.now(TIMEZONE), cfg["send_time"], cfg["days"])}, up to {cfg["emails_per_day"]} a day (South Africa).'
         if days > 1:
             message += f' That takes about {days} sending days. Raise the daily limit in Settings to go faster.'
     elif ok:

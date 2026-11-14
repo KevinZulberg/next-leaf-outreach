@@ -4,21 +4,24 @@ Finds South African businesses, opens their websites to find a published company
 
 ## A normal day (autopilot, on by default)
 
-Monday to Thursday, Johannesburg time. You can change every number below on the **Settings** page.
+Monday to Thursday. Every number and time below is on the **Settings** page and changes straight away.
 
-| Time | What happens |
+| Time (Johannesburg) | What happens |
 | --- | --- |
-| 06:00 | **Find.** Runs up to 80 searches (Tavily), opens each new website, looks for its published email, and writes a draft with your template. |
-| 08:00 | **Send.** Emails up to 100 businesses, about 20 seconds apart, through HMail Plus, then stops for the day. |
+| 06:00 | **Find.** Up to 80 searches for South African businesses and 10 for UK ones (Tavily). Each new website is opened, its published email is found, and a draft is written. |
+| 08:00 | **Send South Africa.** Up to 80 emails, about 20 seconds apart. |
+| 11:00 | **Send UK.** Up to 20 emails (09:00 in the UK in winter). |
 
-Contacts you import (for example a list from ChatGPT) are drafted automatically and sent **before** businesses found by search. Raise "Emails per day" to 200 on Settings when you add a big list.
+South Africa and the UK have separate numbers, so you can change one without the other. Set UK emails to 0 to stop UK sending. Contacts you import (for example a list from ChatGPT) are drafted automatically and sent **before** businesses found by search; addresses ending in `.uk` count as UK. Raise the South Africa number when you add a big list.
+
+**UK rules:** the UK search only keeps companies whose website shows Ltd, Limited, LLP or PLC and a UK address, and only the generic address they publish (info@, sales@). Named people and Gmail-style addresses are skipped. **Tools → Find UK businesses** finds a batch (default 200) on demand.
 
 ## The website
 
 * **Leads** – the big **Autopilot ON/OFF** switch, searches and credits today, businesses ready, emails sent today, and every lead in tabs. Select businesses to **Send now** or **Skip** them.
 * **Sending** – the queue, recent sends, test email.
 * **Opt-outs** – people who asked to stop.
-* **Settings** – autopilot switch, days, search time, send time, searches per day, emails per day, pause between emails, and whether found businesses are emailed.
+* **Settings** – autopilot switch, days, search time, and separate searches per day, emails per day and send time for South Africa and the UK, plus the pause between emails.
 * **Tools** – search a specific trade or town, edit the email template, import a CSV, export, re-check websites that had no email.
 
 ## Quick start
@@ -56,4 +59,4 @@ The same 11 trades in all 9 provinces: laser cutting and metal fabrication, prec
 * There is no login. Do not expose the port to the internet; use an SSH tunnel (see `HOSTING.md`).
 * Back up `outreach.db`; it holds addresses, drafts and logs.
 * A successful send means the mail server accepted it. Bounces and replies are not tracked.
-* Tavily credits: 1 per search. At 80 searches a day on 4 days a week you use about 1,370 a month, so searching pauses when a 1,000-credit plan runs out. Lower "Searches per day" on Settings to last the month.
+* Tavily credits: 1 per search. At 90 searches a day (80 SA + 10 UK) on 4 days a week you use about 1,550 a month, so searching pauses when a 1,000-credit plan runs out. Lower the searches per day on Settings to last the month.

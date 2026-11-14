@@ -102,13 +102,13 @@ def run_search(manual=False, custom=None, recheck=False):
             if latest and latest['status'] == 'running':
                 # We hold the lock, so no run is really going: it was cut off by a restart.
                 db.execute("UPDATE research_runs SET status='interrupted' WHERE id=?", (latest['id'],))
-            used_today = db.execute('SELECT coalesce(sum(searches),0) FROM research_runs WHERE day=?', (day,)).fetchone()[0]
+            used_today = db.execute("SELECT coalesce(sum(searches),0) FROM research_runs WHERE day=? AND region != 'United Kingdom'", (day,)).fetchone()[0]
             if not manual and not recheck:
                 if not cfg['autopilot'] or now.weekday() not in cfg['days']:
                     return
                 if (now.hour, now.minute) < hour_minute(cfg['research_time']):
                     return
-                if db.execute('SELECT 1 FROM research_runs WHERE day=? AND manual=0', (day,)).fetchone():
+                if db.execute("SELECT 1 FROM research_runs WHERE day=? AND manual=0 AND region != 'United Kingdom'", (day,)).fetchone():
                     return
             region, industry = 'South Africa', 'Multiple industries'
             if custom:
@@ -192,23 +192,33 @@ def run_search(manual=False, custom=None, recheck=False):
         RUN_LOCK.release()
 
 
-def run_uk(target=200):
-    """Find UK limited companies with a published role email (info@, sales@) until `target` are found.
+def run_uk(target=200, scheduled=False):
+    """Find UK limited companies with a published role email (info@, sales@).
 
-    Each business is drafted as soon as it is found, so it joins the normal send queue.
+    Manual: until `target` are found (at most UK_MAX_SEARCHES searches). Scheduled: the daily UK search
+    allowance from Settings. Each business is drafted as soon as it is found, so it joins the send queue.
     """
     if not os.getenv('TAVILY_API_KEY', '').strip() or not RUN_LOCK.acquire(blocking=False):
         return
     run_id = None
     try:
         now = datetime.now(TIMEZONE)
+        cfg = get_settings()
+        day = now.date().isoformat()
         with closing(conn()) as db, db:
             db.execute('BEGIN IMMEDIATE')
+            if scheduled:
+                if (not cfg['autopilot'] or now.weekday() not in cfg['days'] or cfg['uk_searches_per_day'] <= 0
+                        or (now.hour, now.minute) < hour_minute(cfg['research_time'])):
+                    return
+                if db.execute("SELECT 1 FROM research_runs WHERE day=? AND manual=0 AND region='United Kingdom'", (day,)).fetchone():
+                    return
+                target = 10 ** 6
             db.execute("UPDATE research_runs SET status='interrupted' WHERE status='running'")
             run_id = db.execute(
                 """INSERT INTO research_runs(day, manual, started_at, region, industry, status)
-                   VALUES(?,1,?,?,?,'running')""",
-                (now.date().isoformat(), now.isoformat(), 'United Kingdom', 'UK businesses'),
+                   VALUES(?,?,?,?,?,'running')""",
+                (day, 0 if scheduled else 1, now.isoformat(), 'United Kingdom', 'UK businesses'),
             ).lastrowid
 
         def count_search():
@@ -218,7 +228,7 @@ def run_uk(target=200):
         domains, added, inspected, found = set(), 0, 0, 0
         searched = failures = 0
         with search_allowance() as remaining:
-            cap = min(UK_MAX_SEARCHES, remaining)
+            cap = min(cfg['uk_searches_per_day'] if scheduled else UK_MAX_SEARCHES, remaining)
             cursor = int(_stored('uk_cursor', 0))
             attempts = 0
             while found < target and searched < cap and failures < 3:
@@ -285,6 +295,7 @@ def start_scheduler():
         while True:
             try:
                 run_search()
+                run_uk(scheduled=True)
             except Exception as exc:
                 logging.getLogger(__name__).error('Scheduler error (%s)', type(exc).__name__)
             sleep(60)

@@ -1,4 +1,4 @@
-"""Autopilot sending: up to "emails per day" messages at the send time, on the chosen days.
+"""Autopilot sending: a daily quota for South Africa and one for the UK, each at its own time.
 
 Everything comes from the Settings page (stored in the database), so changes apply at once.
 """
@@ -9,25 +9,22 @@ from threading import Thread
 from time import sleep
 
 from blocklist import is_law_firm
-from app import DIRECTORY_TITLE, TIMEZONE, conn, day_start_utc, get_settings, hour_minute, smtp_config, submit_contact
+from app import (DIRECTORY_TITLE, TIMEZONE, conn, day_start_utc, get_settings, hour_minute, market_sql,
+                 sent_today_by_market, smtp_config, submit_contact)
 
 UNCERTAIN_PAUSE = timedelta(minutes=15)
 UNCERTAIN_DAILY_STOP = 3
 
 
-def sent_today(db, start):
-    """Emails already handled today (manual and automatic); uncertain ones count, to stay safe."""
-    return db.execute("SELECT count(*) FROM send_log WHERE sent_at >= ?", (start,)).fetchone()[0]
-
-
-def pick_contacts(db, room, send_found=True):
+def pick_contacts(db, room, send_found=True, market='sa'):
     """Oldest first within each group: approved by hand, then added by you (imports), then found online."""
-    rows = db.execute("""
+    rows = db.execute(f"""
         SELECT c.company, c.email, c.observation, c.id, c.status, c.consent_basis, c.consent_evidence,
                (SELECT p.email_source FROM prospects p WHERE p.email = c.email COLLATE NOCASE LIMIT 1) AS source,
                EXISTS (SELECT 1 FROM prospects p WHERE p.email = c.email COLLATE NOCASE) AS found_online
         FROM contacts c
         WHERE c.status IN ('approved','draft')
+          AND {market_sql('c.email')} = ?
           AND c.email NOT IN (SELECT email FROM suppression)
           AND length(trim(c.subject)) > 0 AND length(trim(c.body)) > 0
           AND c.body NOT LIKE '%[Your website / contact details]%'
@@ -39,36 +36,36 @@ def pick_contacts(db, room, send_found=True):
                       WHEN NOT EXISTS (SELECT 1 FROM prospects p WHERE p.email = c.email COLLATE NOCASE) THEN 1
                       ELSE 2 END, c.id
         LIMIT ?
-    """, (int(send_found), room + 300)).fetchall()
+    """, (market, int(send_found), room + 300)).fetchall()
     sendable = [row for row in rows if not DIRECTORY_TITLE.search(row['company'])
                 and not is_law_firm(row['company'], row['email'], row['observation'])]
     return sendable[:room]
 
 
-def run_nightly_send(now=None, delay=None):
-    """Send today's batch if autopilot is on, it is a send day, past send time and under the limit."""
-    now = now or datetime.now(TIMEZONE)
+def send_market(now, market, delay):
+    """Send one market's batch if it is its send time and it is under its daily limit."""
     cfg = get_settings()
-    if not cfg['autopilot'] or now.weekday() not in cfg['days']:
+    when, limit = ((cfg['send_time'], cfg['emails_per_day']) if market == 'sa'
+                   else (cfg['uk_send_time'], cfg['uk_emails_per_day']))
+    if not cfg['autopilot'] or now.weekday() not in cfg['days'] or limit <= 0:
         return 0
-    if (now.hour, now.minute) < hour_minute(cfg['send_time']):
+    if (now.hour, now.minute) < hour_minute(when):
         return 0
     start = day_start_utc(now)
     with closing(conn()) as db:
-        used = sent_today(db, start)
+        used = sent_today_by_market(db, start)[market]
         trouble = [row['sent_at'] for row in db.execute(
             "SELECT sent_at FROM send_log WHERE result='uncertain' AND sent_at >= ? ORDER BY id DESC", (start,))]
         if len(trouble) >= UNCERTAIN_DAILY_STOP:
             return 0
         if trouble and datetime.now(timezone.utc) - datetime.fromisoformat(trouble[0]) < UNCERTAIN_PAUSE:
             return 0
-        if used >= cfg['emails_per_day']:
+        if used >= limit:
             return 0
-        contacts = pick_contacts(db, cfg['emails_per_day'] - used, cfg['send_found'])
+        contacts = pick_contacts(db, limit - used, cfg['send_found'], market)
     if not contacts:
         return 0
     smtp_config()
-    delay = cfg['delay_seconds'] if delay is None else delay
     sent = 0
     for contact in contacts:
         if datetime.now(TIMEZONE).date() != now.date() or not get_settings()['autopilot']:
@@ -93,8 +90,15 @@ def run_nightly_send(now=None, delay=None):
     return sent
 
 
+def run_nightly_send(now=None, delay=None):
+    """South Africa first, then the UK at its own time. Returns the number of emails sent."""
+    now = now or datetime.now(TIMEZONE)
+    delay = get_settings()['delay_seconds'] if delay is None else delay
+    return sum(send_market(now, market, delay) for market in ('sa', 'uk'))
+
+
 def start_sending():
-    """Always running; each 30 seconds it checks the Settings page to see whether it is time."""
+    """Always running; every 30 seconds it checks the Settings page to see whether it is time."""
     def poll():
         while True:
             try:

@@ -33,19 +33,46 @@
     </section>
 
     <section class="panel">
-        <div class="panel-head"><div><h2>How much</h2><p>Per day, on the days above.</p></div></div>
-        <div class="field-row">
-            <div class="field"><label for="searches_per_day">Searches per day</label>
-                <input id="searches_per_day" name="searches_per_day" type="number" min="0" max="500" value="{{ cfg.searches_per_day }}" required>
-                <p class="help" id="credit-note">Each search uses 1 Tavily credit.</p></div>
-            <div class="field"><label for="emails_per_day">Emails per day</label>
-                <input id="emails_per_day" name="emails_per_day" type="number" min="0" max="1000" value="{{ cfg.emails_per_day }}" required>
-                <div class="quick"><button type="button" class="secondary small" data-set="emails_per_day" data-value="50">50</button>
-                    <button type="button" class="secondary small" data-set="emails_per_day" data-value="100">100</button>
-                    <button type="button" class="secondary small" data-set="emails_per_day" data-value="200">200</button></div>
-                <p class="help">Imported a big list from ChatGPT? Choose 200.</p></div>
+        <div class="panel-head"><div><h2>How much</h2><p>Per day, on the days above. Each country has its own numbers, so you can change one without touching the other.</p></div></div>
+
+        <div class="market">
+            <h3>South Africa</h3>
+            <div class="field-row">
+                <div class="field"><label for="searches_per_day">Searches per day</label>
+                    <input id="searches_per_day" name="searches_per_day" type="number" min="0" max="500" value="{{ cfg.searches_per_day }}" required>
+                    <p class="help">Each search uses 1 Tavily credit.</p></div>
+                <div class="field"><label for="emails_per_day">Emails per day</label>
+                    <input id="emails_per_day" name="emails_per_day" type="number" min="0" max="1000" value="{{ cfg.emails_per_day }}" required>
+                    <div class="quick"><button type="button" class="secondary small" data-set="emails_per_day" data-value="50">50</button>
+                        <button type="button" class="secondary small" data-set="emails_per_day" data-value="80">80</button>
+                        <button type="button" class="secondary small" data-set="emails_per_day" data-value="150">150</button></div>
+                    <p class="help">Sent at the time above. Lists you import count here.</p></div>
+            </div>
         </div>
-        <div class="field-row">
+
+        <div class="market">
+            <h3>United Kingdom</h3>
+            <div class="field-row">
+                <div class="field"><label for="uk_searches_per_day">Searches per day</label>
+                    <input id="uk_searches_per_day" name="uk_searches_per_day" type="number" min="0" max="500" value="{{ cfg.uk_searches_per_day }}" required>
+                    <p class="help">Finds UK Ltd companies with a published info@ or sales@ address.</p></div>
+                <div class="field"><label for="uk_emails_per_day">Emails per day</label>
+                    <input id="uk_emails_per_day" name="uk_emails_per_day" type="number" min="0" max="1000" value="{{ cfg.uk_emails_per_day }}" required>
+                    <div class="quick"><button type="button" class="secondary small" data-set="uk_emails_per_day" data-value="0">Off</button>
+                        <button type="button" class="secondary small" data-set="uk_emails_per_day" data-value="20">20</button>
+                        <button type="button" class="secondary small" data-set="uk_emails_per_day" data-value="50">50</button></div>
+                    <p class="help">Set to 0 to stop UK emails.</p></div>
+            </div>
+            <div class="field-row">
+                <div class="field"><label for="uk_send_time">Send UK emails at</label>
+                    <input id="uk_send_time" name="uk_send_time" type="time" value="{{ cfg.uk_send_time }}" required>
+                    <p class="help">Johannesburg time. 11:00 is 09:00 in the UK in winter, 10:00 in summer.</p></div>
+            </div>
+        </div>
+
+        <p class="help" id="credit-note">Each search uses 1 Tavily credit.</p>
+
+        <div class="field-row" style="margin-top:14px">
             <div class="field"><label for="delay_seconds">Pause between emails (seconds)</label>
                 <input id="delay_seconds" name="delay_seconds" type="number" min="0" max="300" value="{{ cfg.delay_seconds }}" required>
                 <p class="help">20 seconds spreads 100 emails over about 35 minutes.</p></div>
