@@ -53,6 +53,8 @@ def init_db():
         )""")
         if 'searches' not in {row['name'] for row in c.execute('PRAGMA table_info(research_runs)')}:
             c.execute('ALTER TABLE research_runs ADD COLUMN searches INTEGER DEFAULT 0')
+        if 'market' not in {row['name'] for row in c.execute('PRAGMA table_info(contacts)')}:
+            c.execute("ALTER TABLE contacts ADD COLUMN market TEXT DEFAULT ''")
         if 'market' not in {row['name'] for row in c.execute('PRAGMA table_info(prospects)')}:
             c.execute("ALTER TABLE prospects ADD COLUMN market TEXT DEFAULT ''")
         c.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
@@ -217,6 +219,7 @@ def days_text(days):
 def market_sql(column):
     """SQL for 'uk' or 'sa': a business found by the UK search, or any .uk address, counts as UK."""
     return (f"(CASE WHEN EXISTS (SELECT 1 FROM prospects mp WHERE mp.email = {column} COLLATE NOCASE AND mp.market = 'uk') "
+            f"OR EXISTS (SELECT 1 FROM contacts mc WHERE mc.email = {column} COLLATE NOCASE AND mc.market = 'uk') "
             f"OR lower({column}) LIKE '%.uk' THEN 'uk' ELSE 'sa' END)")
 
 
@@ -701,8 +704,8 @@ def tools():
 
 @app.get('/sample.csv')
 def sample():
-    out=io.StringIO();w=csv.writer(out);w.writerow(['company','email','contact_name','observation','consent_basis','consent_evidence'])
-    w.writerow(['Example Engineering','example@example.com','Sam','you manufacture precision components','consent','Opt-in form dated YYYY-MM-DD'])
+    out=io.StringIO();w=csv.writer(out);w.writerow(['company','email','contact_name','observation','market'])
+    w.writerow(['Example Engineering','example@example.com','Sam','you manufacture precision components','uk'])
     return Response(out.getvalue(),mimetype='text/csv',headers={'Content-Disposition':'attachment; filename=nextleaf_contacts_sample.csv'})
 
 @app.post('/import')
@@ -712,7 +715,7 @@ def upload():
     try:reader=csv.DictReader(io.StringIO(file.read().decode('utf-8-sig')))
     except UnicodeDecodeError:abort(400,'CSV must be UTF-8')
     if not reader.fieldnames or not {'company','email'}.issubset(set(reader.fieldnames)):abort(400,'CSV needs company and email')
-    ok=0;skipped=0;law_firms=0;same_business=0
+    ok=0;skipped=0;law_firms=0;same_business=0;uk_added=0
     with conn() as c:
         for r in reader:
             email=(r.get('email') or '').strip().lower()
@@ -720,12 +723,14 @@ def upload():
             if is_law_firm(company, email, r.get('observation') or ''):law_firms+=1;continue
             if EMAIL_RE.fullmatch(email) and business_taken(c, email):same_business+=1;continue
             if not EMAIL_RE.fullmatch(email) or not company or c.execute('SELECT 1 FROM suppression WHERE email=?',(email,)).fetchone():skipped+=1;continue
-            vals=[company,email,(r.get('contact_name') or '').strip(),(r.get('observation') or '').strip(),(r.get('consent_basis') or '').strip(),(r.get('consent_evidence') or '').strip()]
-            cur=c.execute('INSERT OR IGNORE INTO contacts(company,email,contact_name,observation,consent_basis,consent_evidence) VALUES(?,?,?,?,?,?)',vals)
+            vals=[company,email,(r.get('contact_name') or '').strip(),(r.get('observation') or '').strip(),(r.get('consent_basis') or '').strip(),(r.get('consent_evidence') or '').strip(),
+                  'uk' if (r.get('market') or '').strip().lower() == 'uk' else '']
+            cur=c.execute('INSERT OR IGNORE INTO contacts(company,email,contact_name,observation,consent_basis,consent_evidence,market) VALUES(?,?,?,?,?,?,?)',vals)
             if cur.rowcount:
                 subject, body = draft_contact({'company': company, 'contact_name': vals[2], 'observation': vals[3]})
                 c.execute('UPDATE contacts SET subject=?, body=? WHERE id=?', (subject, body, cur.lastrowid))
             ok+=cur.rowcount;skipped+=not cur.rowcount
+            uk_added+=cur.rowcount and vals[6] == 'uk'
     cfg = get_settings()
     message = f'Imported {ok} contacts with drafts ready; skipped {skipped} duplicates/invalid/suppressed.'
     if law_firms:
@@ -733,10 +738,18 @@ def upload():
     if same_business:
         message += f' Left out {same_business} more addresses at businesses already on the list (one email per business).'
     if ok and cfg['autopilot']:
-        days = -(-ok // max(1, cfg['emails_per_day'])) if cfg['emails_per_day'] else 0
-        message += f' Autopilot emails them from {next_slot(datetime.now(TIMEZONE), cfg["send_time"], cfg["days"])}, up to {cfg["emails_per_day"]} a day (South Africa).'
-        if days > 1:
-            message += f' That takes about {days} sending days. Raise the daily limit in Settings to go faster.'
+        now = datetime.now(TIMEZONE)
+        sa_added = ok - uk_added
+        parts = []
+        if sa_added:
+            days = -(-sa_added // max(1, cfg['emails_per_day'])) if cfg['emails_per_day'] else 0
+            parts.append(f'{sa_added} South African from {next_slot(now, cfg["send_time"], cfg["days"])}, up to {cfg["emails_per_day"]} a day'
+                         + (f' (about {days} sending days)' if days > 1 else ''))
+        if uk_added:
+            days = -(-uk_added // max(1, cfg['uk_emails_per_day'])) if cfg['uk_emails_per_day'] else 0
+            parts.append(f'{uk_added} UK from {next_slot(now, cfg["uk_send_time"], cfg["days"])}, up to {cfg["uk_emails_per_day"]} a day'
+                         + (f' (about {days} sending days)' if days > 1 else ''))
+        message += ' Autopilot emails them: ' + '; '.join(parts) + '. Change the daily limits in Settings to go faster or slower.'
     elif ok:
         message += ' Autopilot is off, so send them from Leads.'
     flash(message)

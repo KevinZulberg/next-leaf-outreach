@@ -41,7 +41,7 @@
     </section>
 
     <section class="panel">
-        <div class="panel-head"><div><h2>Import contacts</h2><p>CSV with company and email columns. Duplicates are skipped.</p></div></div>
+        <div class="panel-head"><div><h2>Import contacts</h2><p>CSV with company and email columns (optional: contact_name, observation, market). Put <code>uk</code> in the market column so they count toward your UK daily limit. Each gets a draft and joins the send queue.</p></div></div>
         <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data">
             <input id="contact-csv" type="file" name="file" accept=".csv" required aria-label="Contact CSV">
             <div class="actions"><button>Import CSV</button><a class="btn secondary" href="{{ url_for('sample') }}">Sample file</a></div>
