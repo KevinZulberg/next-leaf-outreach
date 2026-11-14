@@ -64,6 +64,26 @@ ROLE_LOCALS = ('info', 'contact', 'enquiries', 'enquiry', 'inquiries', 'sales', 
                'quotes', 'orders', 'accounts', 'support', 'service', 'mail', 'general', 'team')
 
 
+# UK mode: only limited companies (PECR treats them as corporate subscribers), and only generic role addresses.
+UK_COMPANY = re.compile(r'\b(?:ltd|limited|llp|plc)\b', re.I)
+UK_PLACE = re.compile(r'united kingdom|\bengland\b|\bscotland\b|\bwales\b|northern ireland|\+44', re.I)
+UK_POSTCODE = re.compile(r'\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b')
+
+
+def uk_company_evidence(text):
+    return bool(UK_COMPANY.search(text) and (UK_PLACE.search(text) or UK_POSTCODE.search(text)))
+
+
+def uk_role_only(emails, domain):
+    """Keep only generic company addresses (info@, sales@ ...) at the company's own domain."""
+    keep = []
+    for email in emails:
+        local, host = email.split('@')
+        if same_site(host, domain) and any(local == r or local.startswith(r) for r in ROLE_LOCALS):
+            keep.append(email)
+    return keep
+
+
 class HTMLInfo(HTMLParser):
     """Collects visible words, links, forms and every place a page can hide an email."""
     def __init__(self):
@@ -337,7 +357,7 @@ def contact_pages(parser, homepage, extra_urls, domain):
             yield candidate
 
 
-def inspect_company_site(url, extra_urls=(), snippet=''):
+def inspect_company_site(url, extra_urls=(), snippet='', uk_only=False):
     """Look for a published company email on the site. Returns email, evidence page and status."""
     p=urlparse(url)
     empty = {'email':'','observation':'','source':url,'observation_source':'','status':'email_not_found'}
@@ -356,7 +376,10 @@ def inspect_company_site(url, extra_urls=(), snippet=''):
         homepage = f'https://{p.hostname}/'
     if parser and is_law_firm(parser.title, domain=domain, text=' '.join(parser.words[:80])):
         return {'email': '', 'observation': '', 'source': '', 'observation_source': '', 'status': 'law_firm'}
+    seen_text = [' '.join(parser.words)] if parser else []
     emails = extract_emails(parser, domain, homepage) if parser else []
+    if uk_only:
+        emails = uk_role_only(emails, domain)
     source = homepage if emails else ''
     form_source = homepage if parser and parser.has_contact_form else ''
     observation = ' '.join(parser.words[:100])[:1300] if parser else ''
@@ -372,7 +395,10 @@ def inspect_company_site(url, extra_urls=(), snippet=''):
             if not observation:
                 observation = ' '.join(page.words[:100])[:1300]
                 observation_source = final_url if observation else ''
+            seen_text.append(' '.join(page.words))
             emails = extract_emails(page, domain, final_url)
+            if uk_only:
+                emails = uk_role_only(emails, domain)
             if emails:
                 source = final_url
                 break
@@ -381,6 +407,11 @@ def inspect_company_site(url, extra_urls=(), snippet=''):
         found = [e for e in (clean_candidate(x) for x in EMAIL_RE.findall(snippet)) if e and same_site(e.split('@')[1], domain)]
         if found:
             emails, source = found[:1], url
+    if uk_only and emails and not uk_company_evidence(' '.join(seen_text)):
+        # A UK-looking email but no sign of a UK limited company: do not use it.
+        return {'email': '', 'observation': '', 'source': '', 'observation_source': '', 'status': 'filtered'}
+    if uk_only and not emails:
+        form_source = ''
     return {'email': emails[0] if emails else '', 'observation': observation,
             'source': source or form_source, 'observation_source': observation_source,
             'status': 'email_found' if emails else ('contact_form' if form_source else 'email_not_found')}

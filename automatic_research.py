@@ -44,6 +44,15 @@ LOCATIONS = tuple(f'{city}, {province}, South Africa' for province, cities in PL
 VARIANTS = 5                      # different wordings of the same search
 COMBOS = len(INDUSTRIES) * len(LOCATIONS)
 STRIDE = next(n for n in range(37, 400) if gcd(n, COMBOS) == 1)   # visits every trade/town pair before repeating
+UK_CITIES = ('London', 'Birmingham', 'Manchester', 'Leeds', 'Sheffield', 'Bristol', 'Liverpool', 'Newcastle',
+             'Nottingham', 'Leicester', 'Coventry', 'Bradford', 'Cardiff', 'Swansea', 'Glasgow', 'Edinburgh',
+             'Aberdeen', 'Belfast', 'Southampton', 'Portsmouth', 'Plymouth', 'Stoke-on-Trent', 'Wolverhampton',
+             'Derby', 'Hull', 'Norwich', 'Reading', 'Milton Keynes', 'Swindon', 'Exeter', 'Oxford', 'Cambridge',
+             'Peterborough', 'Northampton', 'Ipswich', 'Bournemouth', 'Preston', 'Sunderland', 'Middlesbrough', 'Dundee')
+UK_LOCATIONS = tuple(f'{city}, United Kingdom' for city in UK_CITIES)
+UK_COMBOS = len(INDUSTRIES) * len(UK_LOCATIONS)
+UK_STRIDE = next(n for n in range(37, 400) if gcd(n, UK_COMBOS) == 1)
+UK_MAX_SEARCHES = 80      # safety cap: credits one UK run may use
 RUN_LOCK = Lock()
 MANUAL_SEARCHES = 10      # searches used by one click of "Find businesses now"
 PENDING_PER_RUN = 150     # older, never-checked websites picked up by each scheduled run
@@ -55,6 +64,12 @@ def query_for(position):
     combo = (position * STRIDE) % COMBOS
     wording = (position // COMBOS) % VARIANTS
     return INDUSTRIES[combo % len(INDUSTRIES)], LOCATIONS[(combo // len(INDUSTRIES)) % len(LOCATIONS)], wording
+
+
+def uk_query_for(position):
+    combo = (position * UK_STRIDE) % UK_COMBOS
+    wording = (position // UK_COMBOS) % VARIANTS
+    return INDUSTRIES[combo % len(INDUSTRIES)], UK_LOCATIONS[(combo // len(INDUSTRIES)) % len(UK_LOCATIONS)], wording
 
 
 def is_running():
@@ -177,6 +192,68 @@ def run_search(manual=False, custom=None, recheck=False):
         RUN_LOCK.release()
 
 
+def run_uk(target=200):
+    """Find UK limited companies with a published role email (info@, sales@) until `target` are found.
+
+    Each business is drafted as soon as it is found, so it joins the normal send queue.
+    """
+    if not os.getenv('TAVILY_API_KEY', '').strip() or not RUN_LOCK.acquire(blocking=False):
+        return
+    run_id = None
+    try:
+        now = datetime.now(TIMEZONE)
+        with closing(conn()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            db.execute("UPDATE research_runs SET status='interrupted' WHERE status='running'")
+            run_id = db.execute(
+                """INSERT INTO research_runs(day, manual, started_at, region, industry, status)
+                   VALUES(?,1,?,?,?,'running')""",
+                (now.date().isoformat(), now.isoformat(), 'United Kingdom', 'UK businesses'),
+            ).lastrowid
+
+        def count_search():
+            with closing(conn()) as db, db:
+                db.execute('UPDATE research_runs SET searches=searches+1 WHERE id=?', (run_id,))
+
+        domains, added, inspected, found = set(), 0, 0, 0
+        searched = failures = 0
+        with search_allowance() as remaining:
+            cap = min(UK_MAX_SEARCHES, remaining)
+            cursor = int(_stored('uk_cursor', 0))
+            attempts = 0
+            while found < target and searched < cap and failures < 3:
+                trade, place, wording = uk_query_for(cursor + attempts)
+                attempts += 1
+                try:
+                    leads = find_companies(trade, place, 20, max_searches=1, on_search=count_search,
+                                           phrase_index=wording)
+                except requests.RequestException as exc:
+                    logging.getLogger(__name__).error('UK search failed (%s)', type(exc).__name__)
+                    failures += 1
+                    continue
+                searched += 1
+                fresh = [lead for lead in leads if lead['domain'] not in domains]
+                domains.update(lead['domain'] for lead in fresh)
+                ids = save_prospects(fresh, market='uk')[1]
+                added += len(ids)
+                done, with_email = enrich_prospects(ids)
+                inspected += done
+                found += with_email
+                prepare_website_drafts()
+                save_settings({'uk_cursor': cursor + attempts})
+        forget_credit_cache()
+        status = 'failed' if searched == 0 and failures else 'completed'
+        with closing(conn()) as db, db:
+            db.execute('UPDATE research_runs SET status=?, found=?, added=?, inspected=?, emails=? WHERE id=?',
+                       (status, len(domains), added, inspected, found, run_id))
+    except Exception as exc:
+        logging.getLogger(__name__).error('UK search failed (%s)', type(exc).__name__)
+        if run_id is not None:
+            _finish(run_id, 'failed')
+    finally:
+        RUN_LOCK.release()
+
+
 def _stored(key, default):
     with closing(conn()) as db:
         row = db.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
@@ -190,6 +267,10 @@ def start_search():
 def start_custom_search(industry, location, target):
     Thread(target=run_search, kwargs={'manual': True, 'custom': (industry, location, target)},
            daemon=True).start()
+
+
+def start_uk_search(target=200):
+    Thread(target=run_uk, args=(target,), daemon=True).start()
 
 
 def start_recheck():

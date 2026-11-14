@@ -53,6 +53,8 @@ def init_db():
         )""")
         if 'searches' not in {row['name'] for row in c.execute('PRAGMA table_info(research_runs)')}:
             c.execute('ALTER TABLE research_runs ADD COLUMN searches INTEGER DEFAULT 0')
+        if 'market' not in {row['name'] for row in c.execute('PRAGMA table_info(prospects)')}:
+            c.execute("ALTER TABLE prospects ADD COLUMN market TEXT DEFAULT ''")
         c.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
         for row in c.execute("SELECT id, company, email, observation FROM contacts WHERE status IN ('draft','approved')").fetchall():
             if is_law_firm(row['company'], row['email'], row['observation']):
@@ -290,7 +292,7 @@ def build_leads(c, now):
         else:
             lead['stage'] = 'queued'
         leads.append(lead)
-    for p in c.execute("SELECT * FROM prospects WHERE email='' ORDER BY id DESC LIMIT 200"):
+    for p in c.execute("SELECT * FROM prospects WHERE email='' AND status != 'filtered' ORDER BY id DESC LIMIT 200"):
         if p['status'] == 'law_firm':
             note = 'Law firm, never emailed'
         elif p['status'] == 'contact_form':
@@ -464,14 +466,14 @@ def research_automatic():
     return redirect(url_for('home'))
 
 
-def save_prospects(leads):
+def save_prospects(leads, market=''):
     added_ids = []
     found_at = datetime.now(TIMEZONE).isoformat(timespec='seconds')
     with conn() as c:
         for lead in leads:
             cur = c.execute(
-                'INSERT OR IGNORE INTO prospects(domain,company,website,snippet,source_url,found_at) VALUES(?,?,?,?,?,?)',
-                (lead['domain'], lead['company'], lead['url'], lead['snippet'], lead['source_url'], found_at),
+                'INSERT OR IGNORE INTO prospects(domain,company,website,snippet,source_url,found_at,market) VALUES(?,?,?,?,?,?,?)',
+                (lead['domain'], lead['company'], lead['url'], lead['snippet'], lead['source_url'], found_at, market),
             )
             if cur.rowcount:
                 added_ids.append(cur.lastrowid)
@@ -522,11 +524,12 @@ def enrich_prospects(prospect_ids, *, retry=False):
 
     def check(prospect_id):
         with conn() as c:
-            row = c.execute(f'SELECT website, source_url, snippet FROM prospects WHERE id=? AND {condition}', (prospect_id,)).fetchone()
+            row = c.execute(f'SELECT website, source_url, snippet, market FROM prospects WHERE id=? AND {condition}', (prospect_id,)).fetchone()
         if row is None:
             return 0, 0
         try:
-            info = inspect_company_site(row['website'], extra_urls=[row['source_url']], snippet=row['snippet'] or '')
+            info = inspect_company_site(row['website'], extra_urls=[row['source_url']], snippet=row['snippet'] or '',
+                                        uk_only=row['market'] == 'uk')
         except Exception:
             info = {'email': '', 'observation': '', 'source': '', 'observation_source': '', 'status': 'email_not_found'}
         with conn() as c:
@@ -577,6 +580,25 @@ def research_draft():
     count = prepare_website_drafts()
     flash(f'Prepared {count} drafts with your outreach template.')
     return redirect(url_for('home'))
+
+@app.post('/research/uk')
+def research_uk():
+    from automatic_research import is_running, start_uk_search
+
+    if not os.getenv('TAVILY_API_KEY', '').strip():
+        flash('Add your Tavily API key to .env to search for businesses.')
+    elif is_running():
+        flash('A search is already running. Try again when it finishes.')
+    else:
+        try:
+            target = max(10, min(int(request.form.get('target', '200')), 500))
+        except ValueError:
+            target = 200
+        start_uk_search(target)
+        time.sleep(0.3)
+        flash(f'Looking for {target} UK businesses with a published company email. They appear on Leads as they are found and join the send queue.')
+    return redirect(url_for('home'))
+
 
 @app.post('/research/recheck')
 def research_recheck():

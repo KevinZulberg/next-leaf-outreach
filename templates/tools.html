@@ -13,6 +13,16 @@
     </section>
 
     <section class="panel">
+        <div class="panel-head"><div><h2>Find UK businesses</h2><p>Same trades, across about 40 UK cities. They join your send queue with a draft each.</p></div></div>
+        <form method="post" action="{{ url_for('research_uk') }}">
+            <label for="uk-target">How many to find</label>
+            <input id="uk-target" type="number" name="target" min="10" max="500" value="200" style="width:8rem;display:block;margin:6px 0 14px;padding:10px 12px;border:1px solid #cfdacf;border-radius:10px">
+            <button {% if not configured %}disabled{% endif %}>Find UK businesses</button>
+        </form>
+        <p class="help" style="margin-top:12px">Only companies whose website shows <em>Ltd</em>, <em>Limited</em>, <em>LLP</em> or <em>PLC</em> and a UK address, and only the generic address they publish (info@, sales@). Uses up to 80 search credits, and stops sooner once it has enough. Takes a while, so it runs in the background.</p>
+    </section>
+
+    <section class="panel">
         <div class="panel-head"><div><h2>Websites without an email</h2><p>{{ no_email }} found so far. Look at them again with the latest email finder. Costs no credits.</p></div></div>
         <div class="actions">
             <form method="post" action="{{ url_for('research_recheck') }}"><button class="secondary">Re-check them now</button></form>
