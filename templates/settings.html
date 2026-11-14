@@ -1,0 +1,68 @@
+<div class="page-heading">
+    <div><h1>Settings</h1><p>Everything about autopilot is here. Changes apply straight away, no restart.</p></div>
+</div>
+
+<form method="post" id="settings-form" data-status-url="{{ url_for('status_json') }}">
+    <input type="hidden" name="permission_token" value="{{ token }}">
+
+    <section class="panel setting-hero{% if cfg.autopilot %} is-on{% endif %}">
+        <label class="switch big">
+            <input type="checkbox" class="sr-only" name="autopilot" value="1" {% if cfg.autopilot %}checked{% endif %}>
+            <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+            <span class="switch-text"><strong>Autopilot</strong>
+                <small>Finds businesses, then emails them, on the schedule below. Turn it off to stop everything.</small></span>
+        </label>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><div><h2>Schedule</h2><p>Johannesburg time. The search runs first so there are fresh businesses to email.</p></div></div>
+        <fieldset class="days" aria-label="Days it runs">
+            <legend class="field-label">Days it runs</legend>
+            {% for name in day_names %}
+            <label class="day"><input type="checkbox" name="days" value="{{ loop.index0 }}" {% if loop.index0 in cfg.days %}checked{% endif %}><span>{{ name[:3] }}</span></label>
+            {% endfor %}
+        </fieldset>
+        <div class="field-row">
+            <div class="field"><label for="research_time">Find businesses at</label>
+                <input id="research_time" name="research_time" type="time" value="{{ cfg.research_time }}" required>
+                <p class="help">Searches, then opens each website to find its email.</p></div>
+            <div class="field"><label for="send_time">Send emails at</label>
+                <input id="send_time" name="send_time" type="time" value="{{ cfg.send_time }}" required>
+                <p class="help">Starts sending here and stops at the daily limit.</p></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><div><h2>How much</h2><p>Per day, on the days above.</p></div></div>
+        <div class="field-row">
+            <div class="field"><label for="searches_per_day">Searches per day</label>
+                <input id="searches_per_day" name="searches_per_day" type="number" min="0" max="500" value="{{ cfg.searches_per_day }}" required>
+                <p class="help" id="credit-note">Each search uses 1 Tavily credit.</p></div>
+            <div class="field"><label for="emails_per_day">Emails per day</label>
+                <input id="emails_per_day" name="emails_per_day" type="number" min="0" max="1000" value="{{ cfg.emails_per_day }}" required>
+                <div class="quick"><button type="button" class="secondary small" data-set="emails_per_day" data-value="50">50</button>
+                    <button type="button" class="secondary small" data-set="emails_per_day" data-value="100">100</button>
+                    <button type="button" class="secondary small" data-set="emails_per_day" data-value="200">200</button></div>
+                <p class="help">Imported a big list from ChatGPT? Choose 200.</p></div>
+        </div>
+        <div class="field-row">
+            <div class="field"><label for="delay_seconds">Pause between emails (seconds)</label>
+                <input id="delay_seconds" name="delay_seconds" type="number" min="0" max="300" value="{{ cfg.delay_seconds }}" required>
+                <p class="help">20 seconds spreads 100 emails over about 35 minutes.</p></div>
+        </div>
+        <label class="option"><input type="checkbox" name="send_found" value="1" {% if cfg.send_found %}checked{% endif %}>
+            <span><strong>Also email businesses found by the search</strong>
+            <small>Untick to send only contacts you added yourself (imports) or approved by hand. Skipped businesses are never emailed.</small></span></label>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head"><div><h2>What it searches for</h2><p>Same trades as before, in every province. Each province is searched town by town, so a full day of searches keeps finding new businesses.</p></div></div>
+        <div class="chips" aria-label="Trades">{% for trade in industries %}<span class="chip">{{ trade }}</span>{% endfor %}</div>
+        <p class="field-label" style="margin-top:14px">Provinces</p>
+        <div class="chips" aria-label="Provinces">{% for region in regions %}<span class="chip alt">{{ region }}</span>{% endfor %}</div>
+        <p class="help" style="margin-top:14px"><strong>Never emailed:</strong> law firms, attorneys, advocates, conveyancers and notaries are skipped at every step, including contacts you import. Anyone on the Opt-outs list is skipped too.</p>
+        <p class="help" style="margin-top:10px">For each business it opens the website (respecting robots.txt), reads the contact, about and footer pages, and keeps the email the company publishes. It also reads emails hidden by Cloudflare, mailto links and Gmail-style addresses.</p>
+    </section>
+
+    <div class="save-row"><button class="big">Save settings</button><span class="help">Times use the 24-hour clock.</span></div>
+</form>

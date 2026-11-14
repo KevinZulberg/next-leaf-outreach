@@ -16,7 +16,7 @@
             <span class="brand-sub">Outreach</span>
         </a>
         <nav aria-label="Main">
-            {% for endpoint, label in [('home', 'Leads'), ('send', 'Sending'), ('suppression', 'Opt-outs'), ('tools', 'Tools')] %}
+            {% for endpoint, label in [('home', 'Leads'), ('send', 'Sending'), ('suppression', 'Opt-outs'), ('settings_page', 'Settings'), ('tools', 'Tools')] %}
             {% set active = request.endpoint == endpoint or (endpoint == 'home' and request.endpoint in ('contact', 'research')) or (endpoint == 'send' and request.endpoint == 'test') %}
             <a class="nav-link{% if active %} active{% endif %}" href="{{ url_for(endpoint) }}" {% if active %}aria-current="page"{% endif %}>{{ label }}</a>
             {% endfor %}

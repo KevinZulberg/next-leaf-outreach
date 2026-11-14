@@ -2,7 +2,7 @@
 
 <div class="tool-grid">
     <section class="panel">
-        <div class="panel-head"><div><h2>Search a specific trade or city</h2><p>Runs in the background and uses up to 3 search credits.</p></div></div>
+        <div class="panel-head"><div><h2>Search a specific trade or city</h2><p>Runs in the background and uses up to 3 search credits. Newly found businesses appear on Leads.</p></div></div>
         <form method="post" action="{{ url_for('research_find') }}">
             <label for="industry">Type of business</label><input id="industry" type="text" name="industry" value="engineering and manufacturing" required>
             <label for="location">City or region</label><input id="location" type="text" name="location" value="Johannesburg South Africa" required>
@@ -13,16 +13,12 @@
     </section>
 
     <section class="panel">
-        <div class="panel-head"><div><h2>Autopilot</h2><p>Set in <code>.env</code>, restart to change.</p></div></div>
-        <div class="stack help">
-            <p>Search: {{ schedule }}, Monday to Thursday · {{ 'On' if enabled else 'Paused' }}</p>
-            <p>Sending: {{ 'On' if auto_send else 'Off' }} · <code>AUTO_SEND</code>, <code>AUTO_SEND_TIME</code>, <code>AUTO_SEND_LIMIT</code></p>
-            <p>Credits: <code>TAVILY_MONTHLY_CREDITS</code>, optional cap <code>RESEARCH_DAILY_SEARCHES</code></p>
+        <div class="panel-head"><div><h2>Websites without an email</h2><p>{{ no_email }} found so far. Look at them again with the latest email finder. Costs no credits.</p></div></div>
+        <div class="actions">
+            <form method="post" action="{{ url_for('research_recheck') }}"><button class="secondary">Re-check them now</button></form>
+            <form method="post" action="{{ url_for('research_draft') }}"><button class="secondary">Write missing drafts</button></form>
         </div>
-        <div class="actions" style="margin-top:14px">
-            <form method="post" action="{{ url_for('research_draft') }}"><button class="secondary small">Write missing drafts</button></form>
-            <form method="post" action="{{ url_for('research_enrich') }}"><button class="secondary small" name="retry" value="1">Re-check 3 older sites</button></form>
-        </div>
+        <p class="help" style="margin-top:12px">Schedule, autopilot and daily amounts are on the <a href="{{ url_for('settings_page') }}">Settings</a> page.</p>
     </section>
 
     <section class="panel span-2">

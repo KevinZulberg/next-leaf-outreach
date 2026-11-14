@@ -10,6 +10,7 @@ from html import escape
 from pathlib import Path
 from flask import Flask, request, redirect, url_for, flash, Response, abort, session, render_template, send_file
 from markupsafe import Markup
+from blocklist import is_law_firm
 from discovery import credit_status, inspect_company_site
 
 BASE = Path(__file__).resolve().parent
@@ -22,6 +23,9 @@ DB = Path(os.getenv('OUTREACH_DB', BASE / 'outreach.db'))
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'local-only-change-this-before-deploying')
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
+
+FINDER_VERSION = '2'
+
 
 def conn():
     c=sqlite3.connect(DB)
@@ -49,6 +53,15 @@ def init_db():
         )""")
         if 'searches' not in {row['name'] for row in c.execute('PRAGMA table_info(research_runs)')}:
             c.execute('ALTER TABLE research_runs ADD COLUMN searches INTEGER DEFAULT 0')
+        c.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+        for row in c.execute("SELECT id, company, email, observation FROM contacts WHERE status IN ('draft','approved')").fetchall():
+            if is_law_firm(row['company'], row['email'], row['observation']):
+                c.execute("UPDATE contacts SET status='skipped' WHERE id=?", (row['id'],))
+        seen = c.execute("SELECT value FROM settings WHERE key='finder_version'").fetchone()
+        if not seen or seen['value'] != FINDER_VERSION:
+            # The email finder was rebuilt: give sites it used to miss another look.
+            c.execute("UPDATE prospects SET researched=0 WHERE email='' AND status IN ('email_not_found','contact_form','discovered')")
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('finder_version',?)", (FINDER_VERSION,))
 
 EMAIL_RE=re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
 
@@ -114,30 +127,81 @@ Yours would be built for {{company}}. Tell me how you currently quote and run jo
 
 Not relevant? Reply "no" and I won't email again.'''
 
-def auto_send_settings():
-    """(hour, minute, daily limit) for the nightly autopilot send."""
-    hour, minute = map(int, os.getenv('AUTO_SEND_TIME', '21:00').split(':'))
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        raise ValueError('AUTO_SEND_TIME must use 24-hour HH:MM format')
+def draft_contact(row):
+    """Subject and body from the standard template; drops the 'I saw ...' line when there is nothing to say."""
+    has_note = bool((row.get('observation') or '').strip())
+    template = BODY if has_note else BODY.replace('I saw {{observation}}. Nice work.\n\n', '')
+    return draft_text(SUBJECT, row), draft_text(template, row)
+
+
+DEFAULT_SETTINGS = {
+    'autopilot': '1', 'research_time': '06:00', 'send_time': '08:00', 'days': '0,1,2,3',
+    'searches_per_day': '80', 'emails_per_day': '100', 'delay_seconds': '20', 'send_found': '1',
+}
+DAY_NAMES = ('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')
+TIME_RE = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
+
+
+def get_settings():
+    """Autopilot settings, edited on the Settings page and stored in the database."""
     try:
-        limit = max(1, int(os.getenv('AUTO_SEND_LIMIT', '100') or 100))
-    except ValueError:
-        limit = 100
-    return hour, minute, limit
+        with conn() as c:
+            stored = dict(c.execute('SELECT key, value FROM settings').fetchall())
+    except sqlite3.Error:
+        stored = {}
+    raw = {**DEFAULT_SETTINGS, **stored}
+
+    def number(key, low, high):
+        try:
+            return max(low, min(int(float(raw[key])), high))
+        except (TypeError, ValueError):
+            return int(DEFAULT_SETTINGS[key])
+
+    def clock_text(key):
+        return raw[key] if TIME_RE.match(raw[key] or '') else DEFAULT_SETTINGS[key]
+
+    days = sorted({int(d) for d in raw['days'].split(',') if d.strip().isdigit() and 0 <= int(d) <= 6})
+    return {
+        'autopilot': raw['autopilot'] == '1', 'research_time': clock_text('research_time'),
+        'send_time': clock_text('send_time'), 'days': days or [0, 1, 2, 3],
+        'searches_per_day': number('searches_per_day', 0, 500), 'emails_per_day': number('emails_per_day', 0, 1000),
+        'delay_seconds': number('delay_seconds', 0, 300), 'send_found': raw['send_found'] == '1',
+    }
 
 
-def next_slot(now, hour, minute, done_today=False):
-    """Human label for the next Monday-Thursday run at hour:minute."""
+def save_settings(values):
+    with conn() as c:
+        for key, value in values.items():
+            c.execute('INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)', (key, str(value)))
+
+
+def hour_minute(text):
+    hour, minute = text.split(':')
+    return int(hour), int(minute)
+
+
+def days_text(days):
+    days = sorted(days)
+    if len(days) == 7:
+        return 'every day'
+    if len(days) > 2 and days == list(range(days[0], days[-1] + 1)):
+        return f'{DAY_NAMES[days[0]]} to {DAY_NAMES[days[-1]]}'
+    return ', '.join(DAY_NAMES[d][:3] for d in days)
+
+
+def next_slot(now, text, days, done_today=False):
+    """Human label for the next scheduled run, e.g. 'tomorrow 08:00'."""
     from datetime import timedelta
+    hour, minute = hour_minute(text)
     for offset in range(8):
         day = now + timedelta(days=offset)
-        if day.weekday() >= 4:
+        if day.weekday() not in days:
             continue
         slot = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if offset == 0 and (slot <= now or done_today):
             continue
         name = 'today' if offset == 0 else ('tomorrow' if offset == 1 else slot.strftime('%A'))
-        return f'{name} {hour:02d}:{minute:02d}'
+        return f'{name} {text}'
     return ''
 
 
@@ -145,10 +209,7 @@ SEND_BATCH_LIMIT = max(1, int(os.getenv('SEND_BATCH_LIMIT', '50') or 50))
 
 
 def send_delay():
-    try:
-        return max(0, min(float(os.getenv('SEND_DELAY_SECONDS', '3')), 60))
-    except ValueError:
-        return 3.0
+    return get_settings()['delay_seconds']
 
 
 def send_batch(contact_ids):
@@ -186,11 +247,13 @@ def build_leads(c, now):
             'website': site['website'] if site else '', 'domain': site['domain'] if site else '',
             'email_source': site['email_source'] if site else '',
             'evidence': site['observation_source'] if site else '',
-            'is_new': bool(site and (site['found_at'] or '')[:10] == today),
+            'origin': 'found' if site else 'added', 'is_new': bool(site and (site['found_at'] or '')[:10] == today),
             'sent_at': r['sent_at'], 'note': '', 'selectable': False,
         }
         if r['status'] == 'draft':
-            if DIRECTORY_TITLE.search(r['company']):
+            if is_law_firm(r['company'], r['email'], r['observation']):
+                lead['note'] = 'Law firm, never emailed'
+            elif DIRECTORY_TITLE.search(r['company']):
                 lead['note'] = 'Looks like a directory page, not a business'
             elif not complete_message(r['subject'], r['body']):
                 lead['note'] = 'Draft needs finishing'
@@ -208,14 +271,16 @@ def build_leads(c, now):
             lead['stage'] = 'queued'
         leads.append(lead)
     for p in c.execute("SELECT * FROM prospects WHERE email='' ORDER BY id DESC LIMIT 200"):
-        if p['status'] == 'contact_form':
+        if p['status'] == 'law_firm':
+            note = 'Law firm, never emailed'
+        elif p['status'] == 'contact_form':
             note = 'Contact form only, no public email'
         elif p['researched']:
             note = 'No public email found'
         else:
             note = 'Waiting to be checked'
         leads.append({
-            'id': None, 'company': p['company'], 'email': '', 'status': 'no_email', 'stage': 'attention',
+            'id': None, 'origin': 'found', 'company': p['company'], 'email': '', 'status': 'no_email', 'stage': 'attention',
             'service': '', 'website': p['website'], 'domain': p['domain'],
             'email_source': p['email_source'] if p['status'] == 'contact_form' else '', 'evidence': '',
             'is_new': (p['found_at'] or '')[:10] == today, 'sent_at': '', 'note': note, 'selectable': False,
@@ -244,44 +309,39 @@ def home():
     counts = {stage: sum(1 for lead in leads if lead['stage'] == stage)
               for stage in ('ready', 'queued', 'sent', 'attention')}
     counts['sent'] = sent_total
-    auto_send = os.getenv('AUTO_SEND', '0') == '1'
-    send_hour, send_minute, send_limit = auto_send_settings()
-    search_hour, search_minute = map(int, os.getenv('RESEARCH_TIME', '09:00').split(':'))
+    cfg = get_settings()
     with conn() as c:
         used_today = c.execute('SELECT count(*) FROM send_log WHERE sent_at >= ?', (day_start_utc(now),)).fetchone()[0]
         scheduled_today = c.execute('SELECT 1 FROM research_runs WHERE day=? AND manual=0', (today,)).fetchone()
         stuck = c.execute("SELECT count(*) FROM contacts WHERE status='uncertain'").fetchone()[0]
     autopilot = {
-        'on': auto_send, 'limit': send_limit, 'used_today': used_today,
-        'approve': os.getenv('AUTO_APPROVE', '1') == '1',
-        'next_send': next_slot(now, send_hour, send_minute, done_today=used_today >= send_limit),
-        'send_time': f'{send_hour:02d}:{send_minute:02d}',
-        'next_search': next_slot(now, search_hour, search_minute, done_today=bool(scheduled_today)),
+        'on': cfg['autopilot'], 'limit': cfg['emails_per_day'], 'used_today': used_today,
+        'found_too': cfg['send_found'], 'searches_per_day': cfg['searches_per_day'],
+        'next_send': next_slot(now, cfg['send_time'], cfg['days'], done_today=used_today >= cfg['emails_per_day']),
+        'send_time': cfg['send_time'], 'research_time': cfg['research_time'], 'days': days_text(cfg['days']),
+        'next_search': next_slot(now, cfg['research_time'], cfg['days'], done_today=bool(scheduled_today)),
         'stuck': stuck,
     }
     return studio_page(
         'dashboard.html', 'Leads', leads=leads, counts=counts, sent_today=sent_today,
         found_today=found[0], found_today_emails=found[1], searches_today=searches_today, latest=latest,
         running=is_running(), token=permission_token(), limit=SEND_BATCH_LIMIT,
-        auto_send=auto_send, autopilot=autopilot,
-        enabled=os.getenv('RESEARCH_AUTOMATION', '1') == '1',
-        configured=bool(os.getenv('TAVILY_API_KEY', '').strip()),
-        schedule=os.getenv('RESEARCH_TIME', '09:00'),
+        autopilot=autopilot, configured=bool(os.getenv('TAVILY_API_KEY', '').strip()),
     )
 
 
 @app.get('/status.json')
 def status_json():
     """Small live-status feed for the Leads page: credits come from Tavily (cached)."""
-    from automatic_research import daily_search_budget, is_running
+    from automatic_research import is_running
 
     now = datetime.now(TIMEZONE)
     with conn() as c:
         used_today = c.execute('SELECT coalesce(sum(searches),0) FROM research_runs WHERE day=?',
                                (now.date().isoformat(),)).fetchone()[0]
-    credits = credit_status()
-    budget = daily_search_budget(now, credits['remaining'] + used_today) if credits else None
-    return {'running': is_running(), 'searches_today': used_today, 'daily_budget': budget, 'credits': credits}
+    cfg = get_settings()
+    return {'running': is_running(), 'searches_today': used_today, 'daily_budget': cfg['searches_per_day'],
+            'credits': credit_status()}
 
 
 @app.post('/confirm-selected')
@@ -300,7 +360,8 @@ def queue_outreach():
     """Give permission for the selected drafts and, when asked, start sending them."""
     selected = {int(value) for value in request.form.getlist('ids') if value.isascii() and value.isdigit() and len(value) <= 18}
     send_now = request.form.get('send_now') == '1'
-    auto_send = os.getenv('AUTO_SEND', '0') == '1'
+    cfg = get_settings()
+    auto_send = cfg['autopilot']
     if not selected:
         flash('Select at least one business first.')
         return redirect(url_for('home'))
@@ -325,7 +386,8 @@ def queue_outreach():
             ORDER BY id""")
         for row in rows.fetchall():
             if (row['id'] in selected and complete_message(row['subject'], row['body'])
-                    and not DIRECTORY_TITLE.search(row['company'])):
+                    and not DIRECTORY_TITLE.search(row['company'])
+                    and not is_law_firm(row['company'], row['email'], row['observation'])):
                 basis, evidence = confirmed_permission(row, now)
                 db.execute("""UPDATE contacts SET status='approved', consent_basis=?,
                     consent_evidence=? WHERE id=?""", (basis, evidence, row['id']))
@@ -340,8 +402,7 @@ def queue_outreach():
         flash(f'{len(approved)} approved. Sending now, about {send_delay():g}s apart.{extra}')
         return redirect(url_for('send'))
     if auto_send:
-        hour, minute, limit = auto_send_settings()
-        flash(f'{len(approved)} approved. They go out at the next {hour:02d}:{minute:02d} send, up to {limit} a day.{extra}')
+        flash(f'{len(approved)} approved. They go out at the next {cfg["send_time"]} send, up to {cfg["emails_per_day"]} a day.{extra}')
         return redirect(url_for('home'))
     flash(f'{len(approved)} approved and waiting on the Sending page.{extra}')
     return redirect(url_for('home'))
@@ -414,7 +475,8 @@ def prepare_website_drafts():
             service = next((service for service in services
                             if re.search(r'\b' + re.escape(service) + r'\b', observation)), None)
             company = ' '.join(row['company'].split())
-            if DIRECTORY_TITLE.search(company):
+            if DIRECTORY_TITLE.search(company) or is_law_firm(company, row['email'], row['observation'], row['domain']):
+                db.execute('UPDATE prospects SET drafted=1 WHERE id=?', (row['id'],))
                 continue
             observation = f'{service} · {row["observation_source"]}' if service else ''
             contact = {'company': company, 'contact_name': '', 'observation': observation}
@@ -432,15 +494,18 @@ def prepare_website_drafts():
 
 
 def enrich_prospects(prospect_ids, *, retry=False):
-    """Check company websites for a published email. Four sites are checked at a time."""
+    """Check company websites for a published email. Eight sites are checked at a time."""
     condition = "researched=1 AND email='' AND status='discovered'" if retry else 'researched=0'
 
     def check(prospect_id):
         with conn() as c:
-            row = c.execute(f'SELECT website FROM prospects WHERE id=? AND {condition}', (prospect_id,)).fetchone()
+            row = c.execute(f'SELECT website, source_url, snippet FROM prospects WHERE id=? AND {condition}', (prospect_id,)).fetchone()
         if row is None:
             return 0, 0
-        info = inspect_company_site(row['website'])
+        try:
+            info = inspect_company_site(row['website'], extra_urls=[row['source_url']], snippet=row['snippet'] or '')
+        except Exception:
+            info = {'email': '', 'observation': '', 'source': '', 'observation_source': '', 'status': 'email_not_found'}
         with conn() as c:
             result = c.execute(
                 f'''UPDATE prospects SET researched=1,email=?,observation=?,email_source=?,observation_source=?,status=?
@@ -450,7 +515,7 @@ def enrich_prospects(prospect_ids, *, retry=False):
             )
         return result.rowcount, result.rowcount if info['email'] else 0
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(check, prospect_ids))
     return sum(r[0] for r in results), sum(r[1] for r in results)
 
@@ -490,15 +555,76 @@ def research_draft():
     flash(f'Prepared {count} drafts with your outreach template.')
     return redirect(url_for('home'))
 
+@app.post('/research/recheck')
+def research_recheck():
+    from automatic_research import is_running, start_recheck
+
+    if is_running():
+        flash('A search is already running. Try again when it finishes.')
+    else:
+        with conn() as c:
+            n = c.execute("UPDATE prospects SET researched=0 WHERE email='' AND status IN ('email_not_found','contact_form','discovered')").rowcount
+        start_recheck()
+        time.sleep(0.3)
+        flash(f'Re-checking {n} websites for a published email. New drafts appear on Leads as they are found.')
+    return redirect(url_for('home'))
+
+
+@app.post('/autopilot')
+def autopilot_switch():
+    verify_permission_token()
+    on = request.form.get('state') == 'on'
+    save_settings({'autopilot': '1' if on else '0'})
+    flash('Autopilot is on. It will search and send on your schedule.' if on else 'Autopilot is off. Nothing will be searched or sent automatically.')
+    return redirect(request.form.get('next') if request.form.get('next', '').startswith('/') else url_for('home'))
+
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings_page():
+    if request.method == 'POST':
+        verify_permission_token()
+        form = request.form
+        problems = []
+        for key, label in (('research_time', 'Search time'), ('send_time', 'Send time')):
+            if not TIME_RE.match(form.get(key, '')):
+                problems.append(f'{label} must look like 08:00.')
+        days = sorted({int(d) for d in form.getlist('days') if d.isdigit() and 0 <= int(d) <= 6})
+        if not days:
+            problems.append('Pick at least one day.')
+        numbers = {}
+        for key, label, high in (('searches_per_day', 'Searches per day', 500), ('emails_per_day', 'Emails per day', 1000),
+                                 ('delay_seconds', 'Pause between emails', 300)):
+            try:
+                value = int(form.get(key, ''))
+                if not 0 <= value <= high:
+                    raise ValueError
+                numbers[key] = value
+            except ValueError:
+                problems.append(f'{label} must be a number from 0 to {high}.')
+        if problems:
+            flash(' '.join(problems))
+            return redirect(url_for('settings_page'))
+        save_settings({
+            'autopilot': '1' if form.get('autopilot') == '1' else '0',
+            'research_time': form['research_time'], 'send_time': form['send_time'],
+            'days': ','.join(map(str, days)), 'send_found': '1' if form.get('send_found') == '1' else '0', **numbers,
+        })
+        flash('Settings saved. They apply straight away.')
+        return redirect(url_for('settings_page'))
+    from automatic_research import INDUSTRIES, REGIONS
+
+    return studio_page('settings.html', 'Settings', cfg=get_settings(), token=permission_token(), day_names=DAY_NAMES,
+                       industries=INDUSTRIES, regions=REGIONS, configured=bool(os.getenv('TAVILY_API_KEY', '').strip()))
+
+
 @app.get('/tools')
 def tools():
     with conn() as c:
         runs = c.execute('SELECT * FROM research_runs ORDER BY id DESC LIMIT 12').fetchall()
+        no_email = c.execute("SELECT count(*) FROM prospects WHERE email=''").fetchone()[0]
     return studio_page(
-        'tools.html', 'Tools', runs=runs, subject=SUBJECT, template=BODY,
+        'tools.html', 'Tools', runs=runs, subject=SUBJECT, template=BODY, no_email=no_email,
         configured=bool(os.getenv('TAVILY_API_KEY', '').strip()),
-        enabled=os.getenv('RESEARCH_AUTOMATION', '1') == '1',
-        schedule=os.getenv('RESEARCH_TIME', '09:00'), auto_send=os.getenv('AUTO_SEND', '0') == '1',
     )
 
 @app.get('/sample.csv')
@@ -514,16 +640,31 @@ def upload():
     try:reader=csv.DictReader(io.StringIO(file.read().decode('utf-8-sig')))
     except UnicodeDecodeError:abort(400,'CSV must be UTF-8')
     if not reader.fieldnames or not {'company','email'}.issubset(set(reader.fieldnames)):abort(400,'CSV needs company and email')
-    ok=0;skipped=0
+    ok=0;skipped=0;law_firms=0
     with conn() as c:
         for r in reader:
             email=(r.get('email') or '').strip().lower()
             company=(r.get('company') or '').strip()
+            if is_law_firm(company, email, r.get('observation') or ''):law_firms+=1;continue
             if not EMAIL_RE.fullmatch(email) or not company or c.execute('SELECT 1 FROM suppression WHERE email=?',(email,)).fetchone():skipped+=1;continue
             vals=[company,email,(r.get('contact_name') or '').strip(),(r.get('observation') or '').strip(),(r.get('consent_basis') or '').strip(),(r.get('consent_evidence') or '').strip()]
             cur=c.execute('INSERT OR IGNORE INTO contacts(company,email,contact_name,observation,consent_basis,consent_evidence) VALUES(?,?,?,?,?,?)',vals)
+            if cur.rowcount:
+                subject, body = draft_contact({'company': company, 'contact_name': vals[2], 'observation': vals[3]})
+                c.execute('UPDATE contacts SET subject=?, body=? WHERE id=?', (subject, body, cur.lastrowid))
             ok+=cur.rowcount;skipped+=not cur.rowcount
-    flash(f'Imported {ok} contacts; skipped {skipped} duplicates/invalid/suppressed.')
+    cfg = get_settings()
+    message = f'Imported {ok} contacts with drafts ready; skipped {skipped} duplicates/invalid/suppressed.'
+    if law_firms:
+        message += f' Left out {law_firms} law firms, which are never emailed.'
+    if ok and cfg['autopilot']:
+        days = -(-ok // max(1, cfg['emails_per_day'])) if cfg['emails_per_day'] else 0
+        message += f' Autopilot emails them from {next_slot(datetime.now(TIMEZONE), cfg["send_time"], cfg["days"])}, up to {cfg["emails_per_day"]} a day.'
+        if days > 1:
+            message += f' That takes about {days} sending days. Raise the daily limit in Settings to go faster.'
+    elif ok:
+        message += ' Autopilot is off, so send them from Leads.'
+    flash(message)
     return redirect('/')
 
 @app.post('/generate')
@@ -663,7 +804,8 @@ def send_message(to,subject,body):
         return f'HMail Plus accepted the email, but saving a copy to Sent could not be confirmed ({type(exc).__name__}).'
     return None
 
-def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None, auto_evidence=None):
+def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None, auto_evidence=None,
+                   basis='published_business_email'):
     """Reserve a recipient before SMTP so simultaneous or interrupted runs cannot resend."""
     now = datetime.now(timezone.utc).isoformat()
     with conn() as db:
@@ -677,6 +819,9 @@ def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None, auto_ev
               AND NOT EXISTS (SELECT 1 FROM suppression WHERE email=contacts.email)
         """, (contact_id, scheduled or confirmed_draft is not None,
               confirmed_draft is not None or auto_evidence is not None)).fetchone()
+        if row is not None and is_law_firm(row['company'], row['email'], row['observation']):
+            db.execute("UPDATE contacts SET status='skipped' WHERE id=?", (contact_id,))
+            return 'skipped'
         if row is None or (scheduled and DIRECTORY_TITLE.search(row['company'])):
             return 'skipped'
         if confirmed_draft is None and not complete_message(row['subject'], row['body']):
@@ -690,8 +835,8 @@ def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None, auto_ev
         elif auto_evidence is not None:
             # Autopilot: recorded honestly as a published business email, not as given consent.
             subject, body = row['subject'], row['body']
-            db.execute("UPDATE contacts SET status='sending', consent_basis='published_business_email', consent_evidence=? WHERE id=?",
-                       (auto_evidence, contact_id))
+            db.execute("UPDATE contacts SET status='sending', consent_basis=?, consent_evidence=? WHERE id=?",
+                       (basis, auto_evidence, contact_id))
         else:
             subject, body = row['subject'], row['body']
             db.execute("UPDATE contacts SET status='sending' WHERE id=?", (contact_id,))
@@ -730,7 +875,7 @@ def test():
 
 @app.route('/send',methods=['GET','POST'])
 def send():
-    auto_send = os.getenv('AUTO_SEND', '0') == '1'
+    auto_send = get_settings()['autopilot']
     if request.method=='POST':
         verify_permission_token()
         requested=[int(x) for x in request.form.getlist('ids') if x.isascii() and x.isdigit() and len(x) <= 18]

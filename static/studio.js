@@ -98,7 +98,6 @@ if (form) {
 const steps = document.getElementById('steps');
 if (steps) {
     const text = document.getElementById('credits-text');
-    const meter = document.getElementById('credit-meter');
     const today = document.getElementById('searches-today');
     let wasRunning = !!document.querySelector('[data-running]');
 
@@ -107,14 +106,9 @@ if (steps) {
             const response = await fetch(steps.dataset.statusUrl, {headers: {Accept: 'application/json'}});
             const data = await response.json();
             today.textContent = data.searches_today;
-            if (data.credits) {
-                const {remaining, limit} = data.credits;
-                const budget = data.daily_budget ? ` · about ${data.daily_budget} searches a day` : '';
-                text.textContent = `${remaining} of ${limit} credits left${budget}`;
-                meter.style.width = `${Math.round(100 * remaining / limit)}%`;
-            } else {
-                text.textContent = 'Credits unavailable';
-            }
+            text.textContent = data.credits
+                ? `${data.credits.remaining} of ${data.credits.limit} credits left`
+                : 'Credits unavailable';
             if (wasRunning && !data.running) { location.reload(); return; }
             wasRunning = data.running;
         } catch (error) {
@@ -145,4 +139,26 @@ if (sendForm && document.getElementById('send-all')) {
     all.addEventListener('change', () => { boxes.forEach(box => { box.checked = all.checked; }); update(); });
     sendForm.addEventListener('change', update);
     update();
+}
+
+/* Settings page: quick buttons and a credit estimate */
+const settingsForm = document.getElementById('settings-form');
+if (settingsForm) {
+    for (const button of settingsForm.querySelectorAll('[data-set]')) {
+        button.addEventListener('click', () => { settingsForm.elements[button.dataset.set].value = button.dataset.value; });
+    }
+    const note = document.getElementById('credit-note');
+    const perDay = settingsForm.elements.searches_per_day;
+    let credits = null;
+    const estimate = () => {
+        const days = settingsForm.querySelectorAll('input[name="days"]:checked').length;
+        const perMonth = Math.round((Number(perDay.value) || 0) * days * 4.3);
+        if (!credits) { note.textContent = 'Each search uses 1 Tavily credit.'; return; }
+        note.textContent = perMonth > credits.limit
+            ? `About ${perMonth} searches a month, but you have ${credits.limit} credits, so searching pauses when they run out.`
+            : `About ${perMonth} searches a month. You have ${credits.remaining} of ${credits.limit} credits left.`;
+    };
+    fetch(settingsForm.dataset.statusUrl).then(r => r.json()).then(data => { credits = data.credits; estimate(); }).catch(() => {});
+    settingsForm.addEventListener('input', estimate);
+    settingsForm.addEventListener('change', estimate);
 }

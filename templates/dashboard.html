@@ -1,51 +1,59 @@
 <div class="page-heading">
     <div>
         <h1>Leads</h1>
-        <p>{% if autopilot.on %}Everything runs by itself. This page is just here to watch it.{% else %}Find businesses, check them, then approve and send.{% endif %}</p>
+        <p>{% if autopilot.on %}Everything runs by itself. This page is here to watch it.{% else %}Autopilot is off, so nothing is searched or sent by itself.{% endif %}</p>
     </div>
-    <form method="post" action="{{ url_for('research_automatic') }}">
-        <button class="secondary" {% if not configured or running %}disabled{% endif %}>Find businesses now</button>
-    </form>
+    <div class="heading-actions">
+        <form method="post" action="{{ url_for('autopilot_switch') }}">
+            <input type="hidden" name="permission_token" value="{{ token }}">
+            <input type="hidden" name="state" value="{{ 'off' if autopilot.on else 'on' }}">
+            <button class="switch{% if autopilot.on %} is-on{% endif %}" role="switch" aria-checked="{{ 'true' if autopilot.on else 'false' }}" title="{{ 'Turn autopilot off' if autopilot.on else 'Turn autopilot on' }}">
+                <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+                <span class="switch-text">Autopilot <b>{{ 'ON' if autopilot.on else 'OFF' }}</b></span>
+            </button>
+        </form>
+        <form method="post" action="{{ url_for('research_automatic') }}">
+            <button class="secondary" {% if not configured or running %}disabled{% endif %} title="Runs 10 searches right now">Find businesses now</button>
+        </form>
+    </div>
 </div>
 
 {% if running %}
 <div class="banner running" data-running><span class="spinner" aria-hidden="true"></span>Searching and checking websites. New businesses appear here by themselves.</div>
 {% endif %}
 {% if latest and latest.status == 'failed' %}
-<div class="banner error">The last search failed. Check your Tavily key and remaining credits under Tools.</div>
+<div class="banner error">The last search failed. Check your Tavily key and remaining credits.</div>
 {% endif %}
 {% if not configured %}
-<div class="banner warn">Add <code>TAVILY_API_KEY</code> to <code>.env</code> so the app can find businesses.</div>
+<div class="banner warn">Add <code>TAVILY_API_KEY</code> to your server's <code>.env</code> file so the app can find businesses.</div>
 {% endif %}
 {% if autopilot.stuck %}
 <div class="banner error">{{ autopilot.stuck }} email{{ 's' if autopilot.stuck != 1 }} could not be confirmed as sent. <a href="{{ url_for('send') }}">Check the Sending page</a> before anything is retried.</div>
 {% endif %}
 {% if autopilot.on %}
-<div class="banner autopilot"><span class="dot" aria-hidden="true"></span><span><strong>Autopilot is on.</strong> Finds businesses at {{ schedule }}, then sends up to {{ autopilot.limit }} emails at {{ autopilot.send_time }}, Monday to Thursday.{% if not autopilot.approve %} Only approved emails are sent.{% endif %}</span></div>
-{% else %}
-<div class="banner warn">Autopilot is off. Set <code>AUTO_SEND=1</code> in <code>.env</code> to send automatically, or approve and send by hand below.</div>
+<div class="banner autopilot"><span class="dot" aria-hidden="true"></span><span><strong>Autopilot is on.</strong> At {{ autopilot.research_time }} it finds businesses (up to {{ autopilot.searches_per_day }} searches), then at {{ autopilot.send_time }} it emails up to {{ autopilot.limit }}. {{ autopilot.days[0]|upper }}{{ autopilot.days[1:] }}. <a href="{{ url_for('settings_page') }}">Change schedule</a></span></div>
 {% endif %}
 
 <section class="steps" aria-label="Today at a glance" data-status-url="{{ url_for('status_json') }}" id="steps">
     <div class="step">
         <div class="step-label"><span class="step-num">1</span> Find businesses</div>
-        <div class="step-value"><span id="searches-today">{{ searches_today }}</span><small>searches today</small></div>
+        <div class="step-value"><span id="searches-today">{{ searches_today }}</span><small>/ {{ autopilot.searches_per_day }} searches today</small></div>
         <div class="step-detail">{{ found_today }} new websites · {{ found_today_emails }} with a company email</div>
-        <div class="meter" aria-hidden="true"><span id="credit-meter"></span></div>
+        <div class="meter" aria-hidden="true"><span style="width: {{ [100, (searches_today * 100 // autopilot.searches_per_day) if autopilot.searches_per_day else 0]|min }}%"></span></div>
         <div class="step-foot"><span id="credits-text">Checking credits…</span>
-            <span>{% if enabled %}Next search {{ autopilot.next_search }}{% else %}Schedule paused{% endif %}</span></div>
+            <span>{% if autopilot.on %}Next search {{ autopilot.next_search }}{% else %}Autopilot off{% endif %}</span></div>
     </div>
     <div class="step highlight">
         <div class="step-label"><span class="step-num">2</span> Ready to email</div>
         <div class="step-value">{{ counts.ready }}<small>businesses</small></div>
-        <div class="step-detail">Each email was found on the company's own website.</div>
+        <div class="step-detail">Each email was found on the company's own website, or added by you.</div>
         <div class="step-foot"><span>{{ counts.attention }} need attention</span><a href="#leads" data-jump="attention">See why</a></div>
     </div>
     <div class="step">
         <div class="step-label"><span class="step-num">3</span> Send</div>
         <div class="step-value">{{ autopilot.used_today }}<small>/ {{ autopilot.limit }} sent today</small></div>
         <div class="step-detail">{% if autopilot.on %}Next send {{ autopilot.next_send }}{% else %}Automatic sending is off{% endif %}</div>
-        <div class="meter" aria-hidden="true"><span style="width: {{ [100, (autopilot.used_today * 100 // autopilot.limit)]|min }}%"></span></div>
+        <div class="meter" aria-hidden="true"><span style="width: {{ [100, (autopilot.used_today * 100 // autopilot.limit) if autopilot.limit else 0]|min }}%"></span></div>
         <div class="step-foot"><span>{{ counts.sent }} sent in total</span><a href="{{ url_for('send') }}">Open Sending</a></div>
     </div>
 </section>
@@ -78,17 +86,17 @@
         </div>
         <div class="lead-email">
             {% if lead.email %}{{ lead.email }}
-                {% if lead.email_source %}<small><a class="ok" href="{{ lead.email_source }}" target="_blank" rel="noopener noreferrer">✓ Found on their website</a></small>{% endif %}
+                {% if lead.email_source %}<small><a class="ok" href="{{ lead.email_source }}" target="_blank" rel="noopener noreferrer">✓ Found on their website</a></small>{% elif lead.origin == 'added' %}<small>Added by you</small>{% endif %}
             {% else %}<span class="muted">{{ lead.note }}</span>
                 {% if lead.email_source %}<small><a href="{{ lead.email_source }}" target="_blank" rel="noopener noreferrer">Open contact form ↗</a></small>{% endif %}
             {% endif %}
         </div>
         <div class="lead-state">
-            {% if lead.stage == 'ready' %}<span class="tag tag-ready">{{ 'Sends ' ~ autopilot.next_send if autopilot.on and autopilot.approve else 'Ready' }}</span>
+            {% if lead.stage == 'ready' %}<span class="tag tag-ready">{{ 'Sends ' ~ autopilot.next_send if autopilot.on and (lead.origin == 'added' or autopilot.found_too) else 'Ready' }}</span>
             {% elif lead.stage == 'queued' %}<span class="tag tag-{{ lead.status }}">{{ {'approved': 'Approved', 'sending': 'Sending', 'uncertain': 'Check delivery'}.get(lead.status, lead.status|capitalize) }}</span>
             {% elif lead.stage == 'sent' %}<span class="tag tag-sent">Sent{% if lead.sent_at %} {{ lead.sent_at[:10] }}{% endif %}</span>
             {% elif lead.email %}<span class="tag tag-draft">{{ lead.note or 'Needs attention' }}</span>
-            {% else %}<span class="tag tag-no_email">No email</span>{% endif %}
+            {% else %}<span class="tag tag-no_email">{{ 'Blocked' if lead.note.startswith('Law firm') else 'No email' }}</span>{% endif %}
         </div>
         <div class="lead-action">{% if lead.id %}<a class="btn secondary small" href="{{ url_for('contact', cid=lead.id) }}">{{ 'View' if lead.stage in ('sent', 'queued') else 'Preview' }}</a>{% endif %}</div>
     </div>
