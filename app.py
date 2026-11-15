@@ -61,6 +61,11 @@ def init_db():
         for row in c.execute("SELECT id, company, email, observation FROM contacts WHERE status IN ('draft','approved')").fetchall():
             if is_law_firm(row['company'], row['email'], row['observation']):
                 c.execute("UPDATE contacts SET status='skipped' WHERE id=?", (row['id'],))
+        if not c.execute("SELECT 1 FROM settings WHERE key='template_version' AND value='2'").fetchone():
+            for row in c.execute("SELECT id, company, contact_name, observation FROM contacts WHERE status IN ('draft','approved') AND body LIKE ?", ('%' + OLD_TEMPLATE_MARKER + '%',)).fetchall():
+                subject, body = draft_contact(dict(row))
+                c.execute('UPDATE contacts SET subject=?, body=? WHERE id=?', (subject, body, row['id']))
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('template_version','2')")
         seen = c.execute("SELECT value FROM settings WHERE key='finder_version'").fetchone()
         if not seen or seen['value'] != FINDER_VERSION:
             # The email finder was rebuilt: give sites it used to miss another look.
@@ -114,22 +119,25 @@ def draft_text(template, row):
     values = fields(row)
     return re.sub(r'\{\{(company|name|observation)\}\}', lambda match: values[match[1]], template)
 
-SUBJECT='A system built around how {{company}} works'
+SUBJECT='Quick question about quotes at {{company}}'
 BODY='''Hi {{name}},
 
-I saw {{observation}}. Nice work.
+A customer asks for an update. The quote is in someone's inbox. The job details are on WhatsApp. Nobody's sure who was meant to follow up.
 
-Most workshops run on quotes in one place, clients in another, prices in a spreadsheet and job updates on WhatsApp. It works, but it eats time.
+Nobody did anything wrong. The work just lives in five places, so even a good team ends up chasing updates.
 
-We build custom systems that bring it all together, designed around how your business already works, not the other way round. Your prices and clients are loaded in, so quotes take minutes. Jobs, team and sales sit on one screen, so you can see what's going on without chasing anyone.
+I'm Aaron, founder of Nextleaf Digital. I build custom workflow software for small businesses, from the first enquiry through to payment.
 
-Have a click around an example: ''' + DEMO_URL + '''
+That might mean sending quotes faster from your own prices, and seeing who owns the next step on every job.
 
-Yours would be built for {{company}}. Tell me how you currently quote and run jobs, and I'll show you what it could look like, free.
+Here's a live demo you can click around in: ''' + DEMO_URL + '''
+
+What's the one step you're always chasing? Reply and I'll tell you what I'd simplify first.
 
 ''' + AARON_SIGNATURE + '''
 
 Not relevant? Reply "no" and I won't email again.'''
+OLD_TEMPLATE_MARKER = 'Most workshops run on quotes in one place'
 
 def email_domain(email):
     return (email or '').rsplit('@', 1)[-1].strip().lower()
