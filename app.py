@@ -61,11 +61,11 @@ def init_db():
         for row in c.execute("SELECT id, company, email, observation FROM contacts WHERE status IN ('draft','approved')").fetchall():
             if is_law_firm(row['company'], row['email'], row['observation']):
                 c.execute("UPDATE contacts SET status='skipped' WHERE id=?", (row['id'],))
-        if not c.execute("SELECT 1 FROM settings WHERE key='template_version' AND value='2'").fetchone():
-            for row in c.execute("SELECT id, company, contact_name, observation FROM contacts WHERE status IN ('draft','approved') AND body LIKE ?", ('%' + OLD_TEMPLATE_MARKER + '%',)).fetchall():
+        if not c.execute("SELECT 1 FROM settings WHERE key='template_version' AND value='3'").fetchone():
+            for row in c.execute("SELECT id, company, contact_name, observation FROM contacts WHERE status IN ('draft','approved') AND (body LIKE ? OR body LIKE ?)", tuple('%' + m + '%' for m in OLD_TEMPLATE_MARKERS)).fetchall():
                 subject, body = draft_contact(dict(row))
                 c.execute('UPDATE contacts SET subject=?, body=? WHERE id=?', (subject, body, row['id']))
-            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('template_version','2')")
+            c.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('template_version','3')")
         seen = c.execute("SELECT value FROM settings WHERE key='finder_version'").fetchone()
         if not seen or seen['value'] != FINDER_VERSION:
             # The email finder was rebuilt: give sites it used to miss another look.
@@ -132,12 +132,14 @@ That might mean sending quotes faster from your own prices, and seeing who owns 
 
 Here's a live demo you can click around in: ''' + DEMO_URL + '''
 
-What's the one step you're always chasing? Reply and I'll tell you what I'd simplify first.
+Roughly how many hours a week go on quotes and chasing updates? Reply with a rough number, and I'll tell you where I'd save you time.
+
+If you're interested in seeing how it works, just message me on WhatsApp: 071 886 9647.
 
 ''' + AARON_SIGNATURE + '''
 
 Not relevant? Reply "no" and I won't email again.'''
-OLD_TEMPLATE_MARKER = 'Most workshops run on quotes in one place'
+OLD_TEMPLATE_MARKERS = ('Most workshops run on quotes in one place', "What's the one step you're always chasing?")
 
 def email_domain(email):
     return (email or '').rsplit('@', 1)[-1].strip().lower()
