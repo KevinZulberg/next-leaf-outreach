@@ -7,6 +7,7 @@ from datetime import datetime, time as clock, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 from html import escape
+from urllib.parse import quote_plus
 from pathlib import Path
 from flask import Flask, request, redirect, url_for, flash, Response, abort, session, render_template, send_file
 from markupsafe import Markup
@@ -828,6 +829,21 @@ def smtp_config():
     if port not in (465,587):raise RuntimeError('Port must be 465 or 587')
     return user,password,host,port
 
+def personal_demo_link(company):
+    """The demo link with the business name added, so the demo can open as 'their' workspace.
+
+    Only the business name goes in the link, never a person's name or email address.
+    """
+    name = ' '.join((company or '').split())[:60]
+    return f'{DEMO_URL}?c={quote_plus(name)}' if name else DEMO_URL
+
+
+def personalise_demo(body, company):
+    """Swap the plain demo link in an email for the personal one (done only when the email is sent)."""
+    link = personal_demo_link(company)
+    return re.sub(re.escape(DEMO_URL) + r'(?![\w/?#-])', lambda _: link, body)
+
+
 def render_email_body(body, logo_src):
     paragraphs = []
     has_logo = False
@@ -844,9 +860,9 @@ def render_email_body(body, logo_src):
         content = escape(paragraph).replace('\n', '<br>')
         content = content.replace('info@nextleaf.co.za', '<a href="mailto:info@nextleaf.co.za">info@nextleaf.co.za</a>')
         content = re.sub(
-            rf'{re.escape(DEMO_URL)}|{re.escape(LEGACY_DEMO_URL)}|https://nextleaf\.co\.za/(?![\w/#?])',
+            rf'{re.escape(DEMO_URL)}(?:\?c=[A-Za-z0-9%+._~-]*)?|{re.escape(LEGACY_DEMO_URL)}|https://nextleaf\.co\.za/(?![\w/#?])',
             lambda link: f'<a href="{link[0]}">'
-            f'{"Nextleaf workflow demo" if link[0] in (DEMO_URL, LEGACY_DEMO_URL) else "nextleaf.co.za"}</a>',
+            f'{"Nextleaf workflow demo" if link[0].startswith(DEMO_URL) or link[0] == LEGACY_DEMO_URL else "nextleaf.co.za"}</a>',
             content,
         )
         paragraphs.append(f'<p>{content}</p>')
@@ -946,7 +962,7 @@ def submit_contact(contact_id, *, scheduled=False, confirmed_draft=None, auto_ev
         """, (row['email'], now)).lastrowid
 
     try:
-        archive_warning = send_message(row['email'], subject, body)
+        archive_warning = send_message(row['email'], subject, personalise_demo(body, row['company']))
     except Exception as exc:
         result, status = 'uncertain', 'uncertain'
         detail = f'{type(exc).__name__}. Reconcile with the mailbox before attempting again.'
