@@ -258,3 +258,5 @@ fieldset.days { border: 0; margin: 0 0 18px; padding: 0; min-width: 0; }
 
 .market { padding: 16px 18px 4px; margin: 0 0 14px; border: 1px solid var(--line); border-radius: 12px; background: #fbfcfa; }
 .market h3 { font-size: 15px; margin: 0 0 8px; color: var(--green-dark); }
+
+.queue-note { padding: 11px 18px; background: #f3f8ff; border-bottom: 1px solid #dbe7f5; color: #25415f; font-size: 13.5px; line-height: 1.5; }

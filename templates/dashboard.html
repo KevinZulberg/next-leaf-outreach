@@ -69,6 +69,12 @@
         </div>
         <label class="search"><span aria-hidden="true">⌕</span><input id="lead-search" type="search" placeholder="Search businesses" aria-label="Search businesses"></label>
     </div>
+    <div class="queue-note" id="queue-note">
+        {% if autopilot.on and (autopilot.waiting_sa or autopilot.waiting_uk) %}
+        <strong>{{ autopilot.waiting_sa + autopilot.waiting_uk }} businesses are waiting, but they don't all go at once.</strong>
+        Autopilot sends at most {{ autopilot.limit_sa }} South African emails a day (from {{ autopilot.send_time }}){% if autopilot.limit_uk %} and {{ autopilot.limit_uk }} UK emails a day (from {{ autopilot.uk_send_time }}){% endif %}, about {{ autopilot.delay }} seconds apart. This list will take about <strong>{{ autopilot.days_needed }} sending day{{ 's' if autopilot.days_needed != 1 }}</strong>. Each row shows its own day.
+        {% elif not autopilot.on %}Autopilot is off, so nothing here is sent automatically.{% else %}Nothing is waiting to be sent.{% endif %}
+    </div>
     <div class="picker" id="picker" {% if not counts.ready %}hidden{% endif %}>
         <label class="check-all"><input class="check" type="checkbox" id="check-all" aria-label="Select all shown"> Select all</label>
         <span>or first</span>
@@ -92,7 +98,7 @@
             {% endif %}
         </div>
         <div class="lead-state">
-            {% if lead.stage == 'ready' %}<span class="tag tag-ready">{{ 'Sends ' ~ autopilot.next_send if autopilot.on and (lead.origin == 'added' or autopilot.found_too) else 'Ready' }}</span>
+            {% if lead.stage == 'ready' %}<span class="tag tag-ready">{{ ('Sends ' ~ lead.when) if lead.when else 'Ready' }}</span>
             {% elif lead.stage == 'queued' %}<span class="tag tag-{{ lead.status }}">{{ {'approved': 'Approved', 'sending': 'Sending', 'uncertain': 'Check delivery'}.get(lead.status, lead.status|capitalize) }}</span>
             {% elif lead.stage == 'sent' %}<span class="tag tag-sent">Sent{% if lead.sent_at %} {{ lead.sent_at[:10] }}{% endif %}</span>
             {% elif lead.email %}<span class="tag tag-draft">{{ lead.note or 'Needs attention' }}</span>

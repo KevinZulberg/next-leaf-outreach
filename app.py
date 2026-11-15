@@ -283,6 +283,50 @@ def day_start_utc(now):
     return datetime.combine(now.date(), clock.min, TIMEZONE).astimezone(timezone.utc).isoformat()
 
 
+def send_labels(now, text, days, limit, used, count):
+    """When each of the next `count` emails will really go out: at most `limit` per sending day."""
+    from datetime import timedelta
+    if count <= 0 or limit <= 0 or not days:
+        return []
+    hour, minute = hour_minute(text)
+    labels = []
+    for offset in range(0, 400):
+        day = now + timedelta(days=offset)
+        if day.weekday() not in days:
+            continue
+        slot = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if offset == 0:
+            capacity = max(0, limit - used)
+            name = f'today {text}' if now < slot else 'sending now'
+        else:
+            capacity = limit
+            name = f'tomorrow {text}' if offset == 1 else f"{slot.strftime('%a %d %b')} {text}"
+        labels += [name] * min(capacity, count - len(labels))
+        if len(labels) >= count:
+            break
+    return labels
+
+
+def assign_send_times(leads, cfg, used_by_market, now):
+    """Give every ready lead its real send day, in the same order the nightly sender uses
+    (your own imports first, then businesses found by search, oldest first, per country)."""
+    for lead in leads:
+        lead['when'] = ''
+    if not cfg['autopilot']:
+        return
+    for market, text, limit in (('sa', cfg['send_time'], cfg['emails_per_day']),
+                                ('uk', cfg['uk_send_time'], cfg['uk_emails_per_day'])):
+        queue = [lead for lead in leads if lead['stage'] == 'ready' and lead['market'] == market
+                 and (lead['origin'] == 'added' or cfg['send_found'])]
+        queue.sort(key=lambda lead: (1 if lead['origin'] == 'added' else 2, lead['id']))
+        for position, (lead, label) in enumerate(zip(queue, send_labels(now, text, cfg['days'], limit, used_by_market[market], len(queue)))):
+            lead['when'] = label
+            lead['queue'] = (position // limit, 0 if market == 'sa' else 1, position)
+    # Show the Ready list in sending order: what goes first is at the top.
+    stage_order = {'ready': 0, 'queued': 1, 'sent': 2, 'attention': 3}
+    leads.sort(key=lambda lead: (stage_order[lead['stage']], lead.get('queue', (10 ** 9, 0, 0))))
+
+
 def build_leads(c, now):
     """Every business the user may need to act on, as plain dicts for the Leads page."""
     today = now.date().isoformat()
@@ -300,6 +344,8 @@ def build_leads(c, now):
             'website': site['website'] if site else '', 'domain': site['domain'] if site else '',
             'email_source': site['email_source'] if site else '',
             'evidence': site['observation_source'] if site else '',
+            'market': 'uk' if ((r['market'] or '') == 'uk' or (site and (site['market'] or '') == 'uk')
+                              or r['email'].lower().endswith('.uk')) else 'sa',
             'origin': 'found' if site else 'added', 'is_new': bool(site and (site['found_at'] or '')[:10] == today),
             'sent_at': r['sent_at'], 'note': '', 'selectable': False,
         }
@@ -372,7 +418,12 @@ def home():
     done_all = by_market['sa'] >= cfg['emails_per_day'] and by_market['uk'] >= cfg['uk_emails_per_day']
     next_sa = next_slot(now, cfg['send_time'], cfg['days'], done_today=by_market['sa'] >= cfg['emails_per_day'])
     next_uk = next_slot(now, cfg['uk_send_time'], cfg['days'], done_today=by_market['uk'] >= cfg['uk_emails_per_day'])
+    assign_send_times(leads, cfg, by_market, now)
+    waiting = {m: sum(1 for lead in leads if lead['stage'] == 'ready' and lead['market'] == m and lead.get('when')) for m in ('sa', 'uk')}
+    days_needed = max([-(-waiting['sa'] // cfg['emails_per_day']) if cfg['emails_per_day'] else 0,
+                       -(-waiting['uk'] // cfg['uk_emails_per_day']) if cfg['uk_emails_per_day'] else 0, 0])
     autopilot = {
+        'waiting_sa': waiting['sa'], 'waiting_uk': waiting['uk'], 'days_needed': days_needed, 'delay': cfg['delay_seconds'],
         'on': cfg['autopilot'], 'limit': limit_total, 'used_today': used_today,
         'limit_sa': cfg['emails_per_day'], 'limit_uk': cfg['uk_emails_per_day'],
         'used_sa': by_market['sa'], 'used_uk': by_market['uk'],

@@ -6,6 +6,7 @@ if (form) {
     const tabs = [...form.querySelectorAll('[data-tab]')];
     const search = document.getElementById('lead-search');
     const picker = document.getElementById('picker');
+    const queueNote = document.getElementById('queue-note');
     const checkAll = document.getElementById('check-all');
     const firstN = document.getElementById('first-n');
     const bar = document.getElementById('action-bar');
@@ -58,6 +59,7 @@ if (form) {
             document.getElementById('empty-title').textContent = title;
             document.getElementById('empty-text').textContent = text;
         }
+        if (queueNote) queueNote.hidden = stage !== 'ready';
         picker.hidden = !(stage === 'ready' && rows.some(row => row.dataset.stage === 'ready' && row.querySelector('input')));
         refresh();
     }
